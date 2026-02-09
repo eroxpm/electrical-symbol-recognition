@@ -10,6 +10,3 @@ model_id: facebook/sam3
 confidence_threshold: 0.5
 mask_threshold: 0.5
 device: cuda
-
-# HuggingFace (optional - can also use HF_TOKEN env var)
-# hf_token: your_token_here

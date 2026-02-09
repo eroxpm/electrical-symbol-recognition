@@ -1,0 +1,29 @@
+services:
+  sam3:
+    build: .
+    image: electrical-symbol-recognition:latest
+    
+    # GPU support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # Mount volumes for data and model cache
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    
+    # Environment variables
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - NVIDIA_VISIBLE_DEVICES=all
+    
+    # Working directory
+    working_dir: /app
+    
+    # Default command (override with docker-compose run)
+    command: ["--help"]

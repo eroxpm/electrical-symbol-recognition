@@ -143,6 +143,53 @@ export HF_TOKEN="your_huggingface_token"
 | `--no-save` | Don't save visualization |
 | `--output-dir`, `-o` | Custom output directory |
 
+## Docker
+
+Run without installing anything (requires NVIDIA Docker):
+
+### Setup
+
+Create a `.env` file with your HuggingFace token:
+
+```bash
+echo "HF_TOKEN=hf_your_token_here" > .env
+```
+
+### Build
+
+```bash
+docker-compose build
+```
+
+### Run with GPU
+
+```bash
+# Basic usage
+docker run --gpus all -v $(pwd)/data:/app/data -v $(pwd)/models:/app/models \
+  electrical-symbol-recognition \
+  --image data/input/raw/image.jpg --prompt "resistor"
+
+# With HuggingFace token
+docker run --gpus all \
+  -e HF_TOKEN="your_token" \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/models:/app/models \
+  electrical-symbol-recognition \
+  --image data/input/raw/image.jpg --prompt "capacitor"
+```
+
+### Using Docker Compose
+
+```bash
+# Build
+docker-compose build
+
+# Run prediction (cleans up after execution)
+docker-compose run --rm sam3 --image data/input/raw/image.jpg --prompt "resistor"
+```
+
+> **Note**: The model (~3.4GB) downloads on first run. Mount `./models` to cache it.
+
 ## License
 
 MIT License

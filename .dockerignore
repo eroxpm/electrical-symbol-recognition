@@ -1,0 +1,32 @@
+# Docker build artifacts
+.git
+.gitignore
+*.md
+!README.md
+
+# Python cache
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+*.egg-info
+
+# Environment
+.env
+.venv
+venv
+*.token
+
+# Data (mounted as volume)
+data/
+models/
+
+# IDE
+.vscode
+.idea
+
+# Notebooks
+notebooks/
+
+# Tests (optional, remove if you want tests in image)
+tests/
