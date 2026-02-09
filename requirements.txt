@@ -1,16 +1,21 @@
 # Electrical Symbol Recognition with SAM3
-# Requirements file - use with sam3-env conda environment
+# Requirements file using HuggingFace Transformers
 
-# Core dependencies (already in sam3-env)
-# torch
-# torchvision
-# numpy
-# pillow
-# matplotlib
-
-# Additional dependencies
-pyyaml>=6.0
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.40.0
 huggingface_hub>=0.20.0
+
+# Image processing
+pillow>=10.0.0
+numpy>=1.24.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Configuration
+pyyaml>=6.0
 
 # Optional: for development
 # pytest>=7.0

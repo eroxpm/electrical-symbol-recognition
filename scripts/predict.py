@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Main prediction script for electrical symbol recognition using SAM3.
+Uses HuggingFace Transformers API.
 
 Usage:
-    python scripts/predict.py --image path/to/image.jpg --prompt "person"
+    python scripts/predict.py --image path/to/image.jpg --prompt "object"
     python scripts/predict.py --image path/to/image.jpg --prompt "face" --show
     python scripts/predict.py --image path/to/image.jpg --prompt "object" --save-masks
 """
@@ -23,7 +24,7 @@ from src.inference.predictor import SymbolPredictor
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Electrical Symbol Recognition with SAM3",
+        description="Electrical Symbol Recognition with SAM3 (Transformers)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     
@@ -38,7 +39,7 @@ def parse_args():
         "--prompt", "-p",
         type=str,
         required=True,
-        help="Text prompt describing objects to detect (e.g., 'person', 'face', 'car')"
+        help="Text prompt describing objects to detect (e.g., 'resistor', 'capacitor', 'face')"
     )
     
     parser.add_argument(
@@ -71,7 +72,7 @@ def parse_args():
     parser.add_argument(
         "--show",
         action="store_true",
-        help="Display the visualization"
+        help="Show results in popup window"
     )
     
     parser.add_argument(
@@ -117,6 +118,7 @@ def main():
     
     print("=" * 60)
     print("Electrical Symbol Recognition with SAM3")
+    print("Using HuggingFace Transformers API")
     print("=" * 60)
     print(f"Image: {image_path}")
     print(f"Prompt: '{args.prompt}'")
@@ -130,22 +132,26 @@ def main():
     
     # Run prediction
     print(f"\nProcessing image with prompt: '{args.prompt}'")
-    boxes, scores, masks = predictor.process_image(
+    results = predictor.process_image(
         image_path=image_path,
         text_prompt=args.prompt,
         save_visualization=not args.no_save,
         save_masks_separately=args.save_masks,
-        show=args.show,
+        show_popup=args.show,
     )
     
     # Print results
+    masks = results.get("masks", [])
+    scores = results.get("scores", [])
+    
     print("\n" + "=" * 60)
     print("Results:")
     print("=" * 60)
-    print(f"Found {len(boxes)} object(s)")
+    print(f"Found {len(masks)} object(s)")
     
-    for i, (box, score) in enumerate(zip(boxes, scores)):
-        print(f"  Object {i+1}: score={score:.4f}")
+    for i, score in enumerate(scores):
+        score_val = float(score) if hasattr(score, 'item') else score
+        print(f"  Object {i+1}: score={score_val:.4f}")
     
     if not args.no_save:
         print(f"\nVisualization saved to: {config.output_dir / 'visualizations'}")

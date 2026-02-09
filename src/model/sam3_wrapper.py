@@ -1,163 +1,205 @@
 """
-SAM3 Model Wrapper for electrical symbol recognition.
+SAM3 Model Wrapper using HuggingFace Transformers API.
 Provides a clean interface to SAM3 functionality.
 """
 
-import sys
-from pathlib import Path
-from typing import Optional, Tuple, List, Any
-
 import torch
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict, Any
+
 from PIL import Image
 
 
 class SAM3Model:
-    """Wrapper class for SAM3 image segmentation model."""
+    """Wrapper class for SAM3 using HuggingFace Transformers API."""
     
     def __init__(
         self,
-        sam3_root: Path,
-        bpe_path: Path,
+        model_id: str = "facebook/sam3",
         confidence_threshold: float = 0.5,
-        device: str = "cuda",
-        use_bfloat16: bool = True,
+        mask_threshold: float = 0.5,
+        device: Optional[str] = None,
         hf_token: Optional[str] = None,
     ):
         """
         Initialize SAM3 model.
         
         Args:
-            sam3_root: Path to SAM3 library root
-            bpe_path: Path to BPE vocabulary file
-            confidence_threshold: Confidence threshold for predictions
+            model_id: HuggingFace model ID
+            confidence_threshold: Confidence threshold for detections
+            mask_threshold: Threshold for mask binarization
             device: Device to run model on ('cuda' or 'cpu')
-            use_bfloat16: Whether to use bfloat16 precision
             hf_token: HuggingFace token for model access
         """
-        self.sam3_root = sam3_root
-        self.bpe_path = bpe_path
+        self.model_id = model_id
         self.confidence_threshold = confidence_threshold
-        self.device = device
-        self.use_bfloat16 = use_bfloat16
+        self.mask_threshold = mask_threshold
         self.hf_token = hf_token
+        
+        # Auto-detect device
+        if device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
         
         self.model = None
         self.processor = None
         self._initialized = False
         
     def initialize(self) -> None:
-        """Initialize the model and processor."""
+        """Initialize the model and processor from HuggingFace."""
         if self._initialized:
             return
-            
-        # Add SAM3 to path
-        sam3_path = str(self.sam3_root)
-        if sam3_path not in sys.path:
-            sys.path.insert(0, sam3_path)
-        
-        # Configure PyTorch for performance
-        if self.device == "cuda":
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            if self.use_bfloat16:
-                torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
         
         # Login to HuggingFace if token provided
         if self.hf_token:
             from huggingface_hub import login
             login(token=self.hf_token)
         
-        # Import and build model
-        from sam3 import build_sam3_image_model
-        from sam3.model.sam3_image_processor import Sam3Processor
+        # Import and load model
+        from transformers import Sam3Model, Sam3Processor
         
-        self.model = build_sam3_image_model(bpe_path=str(self.bpe_path))
-        self.Sam3Processor = Sam3Processor
-        self._initialized = True
+        # Use local cache directory in project
+        from pathlib import Path
+        cache_dir = Path(__file__).parent.parent.parent / "models" / "huggingface"
+        cache_dir.mkdir(parents=True, exist_ok=True)
         
-    def set_image(self, image: Image.Image) -> Any:
-        """
-        Set the image for processing.
-        
-        Args:
-            image: PIL Image to process
-            
-        Returns:
-            Inference state for the image
-        """
-        if not self._initialized:
-            self.initialize()
-            
-        self.processor = self.Sam3Processor(
-            self.model,
-            confidence_threshold=self.confidence_threshold
+        print(f"Loading SAM3 model from {self.model_id}...")
+        print(f"Cache directory: {cache_dir}")
+        self.model = Sam3Model.from_pretrained(
+            self.model_id,
+            cache_dir=str(cache_dir)
+        ).to(self.device)
+        self.processor = Sam3Processor.from_pretrained(
+            self.model_id,
+            cache_dir=str(cache_dir)
         )
-        self.current_image = image
-        self.image_size = image.size  # (width, height)
-        
-        return self.processor.set_image(image)
+        self._initialized = True
+        print("Model loaded successfully!")
     
     def predict_with_text(
         self,
-        inference_state: Any,
+        image: Image.Image,
         text_prompt: str,
-    ) -> Tuple[List[Any], List[float], List[Any]]:
+    ) -> Dict[str, Any]:
         """
         Predict objects using text prompt.
         
         Args:
-            inference_state: State from set_image
+            image: PIL Image to process
             text_prompt: Text description of objects to find
             
         Returns:
-            Tuple of (boxes, scores, masks)
+            Dict with 'masks', 'boxes', 'scores'
         """
         if not self._initialized:
-            raise RuntimeError("Model not initialized. Call set_image first.")
-            
-        boxes, scores, masks = self.processor.predict(
-            inference_state,
-            text_prompt=text_prompt,
-        )
+            self.initialize()
         
-        return boxes, scores, masks
+        # Prepare inputs
+        inputs = self.processor(
+            images=image,
+            text=text_prompt,
+            return_tensors="pt"
+        ).to(self.device)
+        
+        # Run inference
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        
+        # Post-process results
+        results = self.processor.post_process_instance_segmentation(
+            outputs,
+            threshold=self.confidence_threshold,
+            mask_threshold=self.mask_threshold,
+            target_sizes=inputs.get("original_sizes").tolist()
+        )[0]
+        
+        return results
     
     def predict_with_box(
         self,
-        inference_state: Any,
-        text_prompt: str,
-        box_prompt: List[float],
-    ) -> Tuple[List[Any], List[float], List[Any]]:
+        image: Image.Image,
+        box_xyxy: List[float],
+        text_prompt: Optional[str] = None,
+        is_positive: bool = True,
+    ) -> Dict[str, Any]:
         """
-        Predict objects using text and box prompt.
+        Predict objects using bounding box prompt.
         
         Args:
-            inference_state: State from set_image
-            text_prompt: Text description of objects to find
-            box_prompt: Bounding box [x, y, w, h] in normalized coordinates
+            image: PIL Image to process
+            box_xyxy: Bounding box [x1, y1, x2, y2] in pixel coordinates
+            text_prompt: Optional text prompt to combine with box
+            is_positive: Whether box is positive (include) or negative (exclude)
             
         Returns:
-            Tuple of (boxes, scores, masks)
+            Dict with 'masks', 'boxes', 'scores'
         """
         if not self._initialized:
-            raise RuntimeError("Model not initialized. Call set_image first.")
+            self.initialize()
         
-        from sam3.model.box_ops import box_xywh_to_cxcywh
+        # Prepare box inputs
+        input_boxes = [[box_xyxy]]
+        input_boxes_labels = [[1 if is_positive else 0]]
         
-        # Convert box coordinates
-        width, height = self.image_size
-        box_prompt_norm = [
-            box_prompt[0] / width,
-            box_prompt[1] / height,
-            box_prompt[2] / width,
-            box_prompt[3] / height,
-        ]
-        box_cxcywh = box_xywh_to_cxcywh(torch.tensor([box_prompt_norm]))
+        # Prepare inputs
+        inputs = self.processor(
+            images=image,
+            text=text_prompt,
+            input_boxes=input_boxes,
+            input_boxes_labels=input_boxes_labels,
+            return_tensors="pt"
+        ).to(self.device)
         
-        boxes, scores, masks = self.processor.predict(
-            inference_state,
-            text_prompt=text_prompt,
-            box_prompt=box_cxcywh,
+        # Run inference
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        
+        # Post-process results
+        results = self.processor.post_process_instance_segmentation(
+            outputs,
+            threshold=self.confidence_threshold,
+            mask_threshold=self.mask_threshold,
+            target_sizes=inputs.get("original_sizes").tolist()
+        )[0]
+        
+        return results
+    
+    def predict_batch(
+        self,
+        images: List[Image.Image],
+        text_prompts: List[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        Batch prediction for multiple images.
+        
+        Args:
+            images: List of PIL Images
+            text_prompts: List of text prompts (one per image)
+            
+        Returns:
+            List of result dicts
+        """
+        if not self._initialized:
+            self.initialize()
+        
+        # Prepare inputs
+        inputs = self.processor(
+            images=images,
+            text=text_prompts,
+            return_tensors="pt"
+        ).to(self.device)
+        
+        # Run inference
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        
+        # Post-process results
+        results = self.processor.post_process_instance_segmentation(
+            outputs,
+            threshold=self.confidence_threshold,
+            mask_threshold=self.mask_threshold,
+            target_sizes=inputs.get("original_sizes").tolist()
         )
         
-        return boxes, scores, masks
+        return results

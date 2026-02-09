@@ -205,3 +205,26 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ===========================================
+# Project-specific ignores
+# ===========================================
+
+# HuggingFace model cache (large model files)
+models/huggingface/
+
+# Model checkpoints
+models/checkpoints/*.pt
+models/checkpoints/*.pth
+models/checkpoints/*.bin
+models/checkpoints/*.safetensors
+
+# Data outputs (generated files)
+data/output/
+
+# SAM3 library (should be cloned separately)
+libs/sam3/
+
+# Secrets / tokens
+.env.local
+*.token

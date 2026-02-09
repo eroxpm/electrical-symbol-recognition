@@ -1,172 +1,223 @@
 """
 Visualization utilities for electrical symbol recognition.
+Includes popup display functionality.
 """
 
-import sys
-from pathlib import Path
-from typing import List, Optional, Tuple, Any
-
 import numpy as np
-from PIL import Image
+import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+from pathlib import Path
+from typing import Optional, List, Any, Tuple
+
+from PIL import Image
 
 
-def plot_results(
+def overlay_masks(
     image: Image.Image,
-    boxes: List[Any],
-    scores: List[float],
-    masks: List[Any],
-    title: str = "Detection Results",
-    save_path: Optional[Path] = None,
-    show: bool = True,
-) -> Optional[plt.Figure]:
+    masks: Any,
+    alpha: float = 0.5,
+) -> Image.Image:
     """
-    Plot detection results with boxes and masks.
+    Overlay segmentation masks on image with different colors.
     
     Args:
         image: Original PIL Image
-        boxes: List of detected bounding boxes
-        scores: List of confidence scores
-        masks: List of segmentation masks
-        title: Plot title
-        save_path: Path to save the figure
-        show: Whether to display the plot
+        masks: Tensor of masks [N, H, W]
+        alpha: Transparency of masks (0-1)
         
     Returns:
-        Matplotlib figure if not showing
+        PIL Image with overlaid masks
     """
-    fig, ax = plt.subplots(1, 1, figsize=(12, 8))
-    ax.imshow(image)
-    ax.set_title(f"{title} - Found {len(boxes)} object(s)")
-    ax.axis('off')
+    image = image.convert("RGBA")
     
-    # Generate colors for each detection
-    colors = plt.cm.rainbow(np.linspace(0, 1, max(len(boxes), 1)))
+    # Handle empty masks
+    if masks is None or len(masks) == 0:
+        return image
     
-    width, height = image.size
+    # Convert masks to numpy
+    if hasattr(masks, 'cpu'):
+        masks = masks.cpu().numpy()
+    masks = (255 * masks).astype(np.uint8)
     
-    for idx, (box, score, mask) in enumerate(zip(boxes, scores, masks)):
-        color = colors[idx]
-        
-        # Draw mask with transparency
-        if mask is not None:
-            mask_np = mask.cpu().numpy() if hasattr(mask, 'cpu') else np.array(mask)
-            if mask_np.ndim == 3:
-                mask_np = mask_np[0]
-            
-            # Create colored mask
-            colored_mask = np.zeros((*mask_np.shape, 4))
-            colored_mask[mask_np > 0.5] = [*color[:3], 0.4]
-            ax.imshow(colored_mask)
-        
-        # Draw bounding box
-        if box is not None:
-            box_np = box.cpu().numpy() if hasattr(box, 'cpu') else np.array(box)
-            if box_np.ndim > 1:
-                box_np = box_np[0]
-            
-            # Convert from normalized to pixel coordinates if needed
-            if np.max(box_np) <= 1.0:
-                x1, y1, x2, y2 = box_np * np.array([width, height, width, height])
-            else:
-                x1, y1, x2, y2 = box_np
-            
-            rect = patches.Rectangle(
-                (x1, y1), x2 - x1, y2 - y1,
-                linewidth=2,
-                edgecolor=color,
-                facecolor='none'
-            )
-            ax.add_patch(rect)
-            
-            # Add score label
-            ax.text(
-                x1, y1 - 5,
-                f'{score:.2f}',
-                color='white',
-                fontsize=10,
-                bbox=dict(boxstyle='round', facecolor=color, alpha=0.8)
-            )
+    n_masks = masks.shape[0]
+    cmap = matplotlib.colormaps.get_cmap("rainbow").resampled(max(n_masks, 1))
+    colors = [
+        tuple(int(c * 255) for c in cmap(i)[:3])
+        for i in range(n_masks)
+    ]
     
-    plt.tight_layout()
+    for mask, color in zip(masks, colors):
+        mask_img = Image.fromarray(mask)
+        overlay = Image.new("RGBA", image.size, color + (0,))
+        alpha_mask = mask_img.point(lambda v: int(v * alpha))
+        overlay.putalpha(alpha_mask)
+        image = Image.alpha_composite(image, overlay)
     
-    if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Saved visualization to {save_path}")
-    
-    if show:
-        plt.show()
-        return None
-    
-    return fig
+    return image
 
 
-def draw_box_on_image(
+def draw_boxes_on_image(
     image: Image.Image,
-    box: List[float],
-    color: Tuple[int, int, int] = (255, 0, 0),
-    thickness: int = 2,
+    boxes: Any,
+    scores: Optional[Any] = None,
+    color: Tuple[int, int, int] = (0, 255, 0),
+    thickness: int = 3,
 ) -> Image.Image:
     """
-    Draw a bounding box on an image.
+    Draw bounding boxes on image.
     
     Args:
         image: PIL Image
-        box: Box coordinates [x1, y1, x2, y2]
+        boxes: Tensor of boxes [N, 4] in xyxy format
+        scores: Optional scores for each box
         color: RGB color tuple
         thickness: Line thickness
         
     Returns:
-        Image with box drawn
+        PIL Image with drawn boxes
     """
-    from PIL import ImageDraw
+    from PIL import ImageDraw, ImageFont
     
-    img_copy = image.copy()
-    draw = ImageDraw.Draw(img_copy)
+    image = image.copy()
+    draw = ImageDraw.Draw(image)
     
-    x1, y1, x2, y2 = box
-    for i in range(thickness):
-        draw.rectangle(
-            [x1 - i, y1 - i, x2 + i, y2 + i],
-            outline=color
-        )
+    if boxes is None or len(boxes) == 0:
+        return image
     
-    return img_copy
+    # Convert to numpy if needed
+    if hasattr(boxes, 'cpu'):
+        boxes = boxes.cpu().numpy()
+    if scores is not None and hasattr(scores, 'cpu'):
+        scores = scores.cpu().numpy()
+    
+    for i, box in enumerate(boxes):
+        x1, y1, x2, y2 = box
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=thickness)
+        
+        if scores is not None:
+            score = float(scores[i])
+            label = f"{score:.2f}"
+            draw.text((x1, y1 - 15), label, fill=color)
+    
+    return image
+
+
+def plot_results(
+    image: Image.Image,
+    results: dict,
+    title: str = "Detection Results",
+    save_path: Optional[Path] = None,
+    show: bool = True,
+    figsize: Tuple[int, int] = (12, 8),
+) -> Optional[plt.Figure]:
+    """
+    Plot detection results with masks and boxes.
+    
+    Args:
+        image: Original PIL Image
+        results: Dict with 'masks', 'boxes', 'scores'
+        title: Plot title
+        save_path: Optional path to save figure
+        show: Whether to display the plot
+        figsize: Figure size
+        
+    Returns:
+        matplotlib Figure if created
+    """
+    masks = results.get("masks", [])
+    boxes = results.get("boxes", [])
+    scores = results.get("scores", [])
+    
+    # Create visualization
+    result_image = overlay_masks(image.copy(), masks)
+    result_image = draw_boxes_on_image(result_image.convert("RGB"), boxes, scores)
+    
+    if show or save_path:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        ax.imshow(result_image)
+        ax.set_title(f"{title} - Found {len(masks)} object(s)")
+        ax.axis("off")
+        
+        if save_path:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_path, bbox_inches="tight", dpi=150)
+            print(f"Saved visualization to {save_path}")
+        
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        
+        return fig
+    
+    return None
+
+
+def show_results_popup(
+    image: Image.Image,
+    results: dict,
+    title: str = "SAM3 Detection Results",
+) -> None:
+    """
+    Show results in a popup window (blocking).
+    
+    Args:
+        image: Original PIL Image
+        results: Dict with 'masks', 'boxes', 'scores'
+        title: Window title
+    """
+    masks = results.get("masks", [])
+    boxes = results.get("boxes", [])
+    scores = results.get("scores", [])
+    
+    # Create visualization
+    result_image = overlay_masks(image.copy(), masks)
+    result_image = draw_boxes_on_image(result_image.convert("RGB"), boxes, scores)
+    
+    # Use matplotlib for popup
+    plt.figure(figsize=(14, 10))
+    plt.imshow(result_image)
+    plt.title(f"{title}\nFound {len(masks)} object(s)")
+    plt.axis("off")
+    plt.tight_layout()
+    plt.show()
 
 
 def save_masks(
-    masks: List[Any],
+    masks: Any,
     output_dir: Path,
     base_name: str = "mask",
 ) -> List[Path]:
     """
-    Save individual masks as images.
+    Save individual masks as PNG files.
     
     Args:
-        masks: List of segmentation masks
+        masks: Tensor of masks [N, H, W]
         output_dir: Directory to save masks
         base_name: Base name for mask files
         
     Returns:
-        List of paths to saved mask files
+        List of saved file paths
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     saved_paths = []
     
-    for idx, mask in enumerate(masks):
-        mask_np = mask.cpu().numpy() if hasattr(mask, 'cpu') else np.array(mask)
-        if mask_np.ndim == 3:
-            mask_np = mask_np[0]
-        
-        # Convert to uint8
-        mask_uint8 = (mask_np * 255).astype(np.uint8)
-        mask_img = Image.fromarray(mask_uint8)
-        
-        save_path = output_dir / f"{base_name}_{idx:03d}.png"
-        mask_img.save(save_path)
-        saved_paths.append(save_path)
-        
+    if masks is None or len(masks) == 0:
+        return saved_paths
+    
+    # Convert to numpy if needed
+    if hasattr(masks, 'cpu'):
+        masks = masks.cpu().numpy()
+    
+    for i, mask in enumerate(masks):
+        mask_img = (mask * 255).astype(np.uint8)
+        mask_pil = Image.fromarray(mask_img)
+        path = output_dir / f"{base_name}_{i:03d}.png"
+        mask_pil.save(path)
+        saved_paths.append(path)
+    
+    print(f"Saved {len(saved_paths)} masks to {output_dir}")
     return saved_paths

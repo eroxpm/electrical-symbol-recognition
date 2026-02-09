@@ -15,13 +15,14 @@ def test_imports():
     from src.config import Config, get_config
     from src.model.sam3_wrapper import SAM3Model
     from src.inference.predictor import SymbolPredictor
-    from src.utils.visualization import plot_results, save_masks
+    from src.utils.visualization import plot_results, save_masks, show_results_popup
     
     assert Config is not None
     assert SAM3Model is not None
     assert SymbolPredictor is not None
     assert plot_results is not None
-    print("All imports successful!")
+    assert show_results_popup is not None
+    print("✓ All imports successful!")
 
 
 def test_config_default():
@@ -32,35 +33,33 @@ def test_config_default():
     
     assert config.confidence_threshold == 0.5
     assert config.device == "cuda"
-    assert config.use_bfloat16 is True
+    assert config.model_id == "facebook/sam3"
     assert config.project_root.exists()
-    print("Default config test passed!")
+    print("✓ Default config test passed!")
 
 
 def test_directory_structure():
     """Test that project directories exist."""
     dirs_to_check = [
         "configs",
-        "data/input",
-        "data/output",
+        "data",
         "models",
         "src",
         "src/model",
         "src/inference",
         "src/utils",
         "scripts",
-        "libs/sam3",
     ]
     
     for dir_path in dirs_to_check:
         full_path = project_root / dir_path
         assert full_path.exists(), f"Directory not found: {dir_path}"
     
-    print("Directory structure test passed!")
+    print("✓ Directory structure test passed!")
 
 
 if __name__ == "__main__":
     test_imports()
     test_config_default()
     test_directory_structure()
-    print("\nAll tests passed!")
+    print("\n✅ All tests passed!")
