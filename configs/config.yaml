@@ -1,0 +1,17 @@
+# Electrical Symbol Recognition - Configuration
+
+# Paths (relative to project root, or absolute)
+project_root: null  # auto-detected if null
+sam3_root: libs/sam3
+bpe_path: libs/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+input_dir: data/input
+output_dir: data/output
+models_dir: models
+
+# Model settings
+confidence_threshold: 0.5
+device: cuda  # 'cuda' or 'cpu'
+use_bfloat16: true
+
+# HuggingFace settings
+# hf_token: your_token_here  # Or set HF_TOKEN environment variable
