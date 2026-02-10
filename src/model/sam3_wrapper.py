@@ -165,6 +165,61 @@ class SAM3Model:
         
         return results
     
+    def predict_with_boxes(
+        self,
+        image: Image.Image,
+        boxes_xyxy: List[List[float]],
+        text_prompt: Optional[str] = None,
+        is_positive: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Predict objects using multiple bounding box prompts.
+        
+        Args:
+            image: PIL Image to process
+            boxes_xyxy: List of bounding boxes [[x1, y1, x2, y2], ...] in pixel coordinates
+            text_prompt: Optional text prompt to combine with boxes
+            is_positive: Whether boxes are positive (include) or negative (exclude)
+            
+        Returns:
+            Dict with 'masks', 'boxes', 'scores'
+        """
+        if not self._initialized:
+            self.initialize()
+        
+        if not boxes_xyxy:
+            return {"masks": [], "boxes": [], "scores": []}
+            
+        # Prepare box inputs - processor expects list of lists of boxes [batch_size, num_boxes, 4]
+        # We have batch_size=1
+        input_boxes = [boxes_xyxy]
+        
+        # Labels: 1 for positive, 0 for negative. One label per box.
+        input_boxes_labels = [[1 if is_positive else 0 for _ in range(len(boxes_xyxy))]]
+        
+        # Prepare inputs
+        inputs = self.processor(
+            images=image,
+            text=text_prompt,
+            input_boxes=input_boxes,
+            input_boxes_labels=input_boxes_labels,
+            return_tensors="pt"
+        ).to(self.device)
+        
+        # Run inference
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        
+        # Post-process results
+        results = self.processor.post_process_instance_segmentation(
+            outputs,
+            threshold=self.confidence_threshold,
+            mask_threshold=self.mask_threshold,
+            target_sizes=inputs.get("original_sizes").tolist()
+        )[0]
+        
+        return results
+    
     def predict_batch(
         self,
         images: List[Image.Image],
