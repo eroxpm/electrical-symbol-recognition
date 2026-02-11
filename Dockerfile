@@ -47,5 +47,6 @@ ENV HF_HOME=/app/models/huggingface
 ENV TRANSFORMERS_CACHE=/app/models/huggingface
 
 # Default command
-ENTRYPOINT ["python3", "scripts/predict.py"]
+# Default command
+ENTRYPOINT ["python3", "scripts/mosaic_inference.py"]
 CMD ["--help"]

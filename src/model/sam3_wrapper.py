@@ -171,6 +171,7 @@ class SAM3Model:
         boxes_xyxy: List[List[float]],
         text_prompt: Optional[str] = None,
         is_positive: bool = True,
+        labels: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """
         Predict objects using multiple bounding box prompts.
@@ -179,7 +180,8 @@ class SAM3Model:
             image: PIL Image to process
             boxes_xyxy: List of bounding boxes [[x1, y1, x2, y2], ...] in pixel coordinates
             text_prompt: Optional text prompt to combine with boxes
-            is_positive: Whether boxes are positive (include) or negative (exclude)
+            is_positive: Whether boxes are positive (include) or negative (exclude). Used if 'labels' is None.
+            labels: Optional list of integer labels (1=positive, 0=negative) for each box. Overrides is_positive.
             
         Returns:
             Dict with 'masks', 'boxes', 'scores'
@@ -195,7 +197,12 @@ class SAM3Model:
         input_boxes = [boxes_xyxy]
         
         # Labels: 1 for positive, 0 for negative. One label per box.
-        input_boxes_labels = [[1 if is_positive else 0 for _ in range(len(boxes_xyxy))]]
+        if labels is not None:
+            if len(labels) != len(boxes_xyxy):
+                raise ValueError(f"Labels length ({len(labels)}) must match boxes length ({len(boxes_xyxy)})")
+            input_boxes_labels = [labels]
+        else:
+            input_boxes_labels = [[1 if is_positive else 0 for _ in range(len(boxes_xyxy))]]
         
         # Prepare inputs
         inputs = self.processor(

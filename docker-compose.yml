@@ -25,5 +25,5 @@ services:
     # Working directory
     working_dir: /app
     
-    # Default command (override with docker-compose run)
-    command: ["--help"]
+    # Default command (empty to use Dockerfile CMD)
+    # command: []
