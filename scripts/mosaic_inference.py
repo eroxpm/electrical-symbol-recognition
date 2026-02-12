@@ -147,6 +147,42 @@ class MatrixGenerator:
                 print(f"  [WARN] Failed to read custom inductor image")
         # --------------------------------
 
+        # --- CUSTOM FA DC OVERRIDE ---
+        # User requested specific file: electrical_75... (Horizontal)
+        custom_dc_filename = "electrical_75_png.rf.5d96d5206833ea346077c38cc7950c68.jpg"
+        
+        if 3 in needed_classes:
+             target_img_id = self.filename_to_id.get(custom_dc_filename)
+             if target_img_id:
+                  anns = self.coco_anns.get(target_img_id, [])
+                  # Find Class 3
+                  dc_ann = next((ann for ann in anns if ann['category_id'] == 3), None)
+                  
+                  if dc_ann:
+                      print(f"  [INFO] FA DC (Class 3): Extracting custom reference from {custom_dc_filename}")
+                      src_path = self.images_dir / custom_dc_filename
+                      src_img = cv2.imread(str(src_path))
+                      
+                      if src_img is not None:
+                          x, y, w, h = map(int, dc_ann['bbox'])
+                          # Use TIGHT crop (0% Margin) as per user request
+                          margin_w = 0 
+                          margin_h = 0
+                          x1 = max(0, x - margin_w); y1 = max(0, y - margin_h)
+                          x2 = min(src_img.shape[1], x + w + margin_w)
+                          y2 = min(src_img.shape[0], y + h + margin_h)
+                          crop = src_img[y1:y2, x1:x2]
+                          
+                          if crop.size > 0:
+                              self.best_crops[3] = crop
+                              needed_classes.remove(3)
+                              
+                  else:
+                       print(f"  [WARN] Custom FA DC image found but no Class 3 annotation present.")
+             else:
+                  print(f"  [WARN] Custom FA DC filename not found in COCO: {custom_dc_filename}")
+        # --------------------------------
+
         for cls_id in list(needed_classes):
             prefix = f"class_{cls_id}_"
             cls_images = [f for f in all_debug_files if f.name.startswith(prefix)]
@@ -216,25 +252,25 @@ class MatrixGenerator:
              cols = 1
              classes_to_render = [target_cls]
              
-             # INDUCTOR SPECIAL: 2 Columns (Standard + Scaled)
-             if target_cls == 2:
+             # Resistor(0), Cap(1), Ind(2), FA DC(3), FA AC(4): 2 Cols
+             if target_cls in [0, 1, 2, 3, 4]:
                  cols = 2
-                 classes_to_render = [2, 2] # Render Class 2 twice
+                 classes_to_render = [target_cls, target_cls] # Render Class twice
         else:
              cols = 5
              classes_to_render = range(5)
              
         cw, ch = MATRIX_CROP_SIZE
         
-        # Dynamic Size for Capacitor (Class 1) & Inductor (Class 2)
-        if (target_cls == 1 or target_cls == 2) and target_cls in self.best_crops:
+        # Dynamic Size for All Classes (0-4)
+        if target_cls in [0, 1, 2, 3, 4] and target_cls in self.best_crops:
              crop = self.best_crops[target_cls]
              h, w = crop.shape[:2]
              s = max(h, w)
              
-             # For Inductor, we need extra space for 1.25x scale
-             if target_cls == 2:
-                 s = int(s * 1.25)
+             # For All Classes (0-4), we need extra space for scaled variations
+             if target_cls in [0, 1, 2, 3, 4]:
+                  s = int(s * 1.40) # Larger buffer to prevent rounding errors (was 1.35)
                  
              cw, ch = s, s # Use native max dim (square)
              print(f"  [INFO] {CLASSES.get(target_cls)} Matrix: Using dynamic size {cw}x{ch}")
@@ -253,12 +289,11 @@ class MatrixGenerator:
                 continue
                 
             base_crop = self.best_crops[cls_id]
-            
-            # Special resize logic for Capacitor (1) and Inductor (2)
-            if cls_id in [1, 2]:
+            # Special resize logic for All Classes (0-4)
+            if cls_id in [0, 1, 2, 3, 4]:
                 
-                # Check for Multi-Scale Column (Inductor, Column 1)
-                is_multiscale_col = (cls_id == 2 and col_idx == 1)
+                # Check for Multi-Scale Column (Column 1)
+                is_multiscale_col = (cls_id in [0, 1, 2, 3, 4] and col_idx == 1)
                 
                 # Expand base crop for 1.25x scale if needed? 
                 # Actually, we resize/place into container below.
@@ -269,8 +304,8 @@ class MatrixGenerator:
             for r in range(4): # Rows
                 img_to_rotate = base_crop # Default
                 
-                # INDUCTOR MULTI-SCALE LOGIC (Column 1)
-                if cls_id == 2 and col_idx == 1:
+                # ALL CLASSES MULTI-SCALE LOGIC (Column 1)
+                if cls_id in [0, 1, 2, 3, 4] and col_idx == 1:
                     # Row 0: 0.75x (0 deg)
                     # Row 1: 0.75x (90 deg)
                     # Row 2: 1.25x (0 deg)
@@ -279,10 +314,21 @@ class MatrixGenerator:
                     scale_factor = 1.0
                     rot_code = None
                     
-                    if r == 0: scale_factor = 0.75; rot_code = None
-                    elif r == 1: scale_factor = 0.75; rot_code = cv2.ROTATE_90_CLOCKWISE
-                    elif r == 2: scale_factor = 1.25; rot_code = None
-                    elif r == 3: scale_factor = 1.25; rot_code = cv2.ROTATE_90_CLOCKWISE
+                    # Default Scales
+                    s_low, s_high = 0.75, 1.25
+                    
+                    # All Classes Tuning: +/- 35% (User Request)
+                    if cls_id in [0, 1, 2, 3, 4]:
+                        s_low, s_high = 0.65, 1.35
+                    
+                    # FA DC (Class 3) Special Tuning: +/- 50%
+                    if cls_id == 3:
+                        s_low, s_high = 0.50, 1.50
+                    
+                    if r == 0: scale_factor = s_low; rot_code = None
+                    elif r == 1: scale_factor = s_low; rot_code = cv2.ROTATE_90_CLOCKWISE
+                    elif r == 2: scale_factor = s_high; rot_code = None
+                    elif r == 3: scale_factor = s_high; rot_code = cv2.ROTATE_90_CLOCKWISE
                     
                     # Resize Base Crop
                     h, w = self.best_crops[cls_id].shape[:2]
@@ -299,18 +345,39 @@ class MatrixGenerator:
                     y_off = (ch - rh) // 2
                     x_off = (cw - rw) // 2
                     
-                    # Clip if needed (though cw, ch should be big enough)
-                    rh_fit = min(rh, ch)
-                    rw_fit = min(rw, cw)
+                    # Coordinate Calculation with Clipping
+                    src_x1, src_y1 = 0, 0
+                    src_x2, src_y2 = rw, rh
+                    dst_x1, dst_y1 = x_off, y_off
+                    dst_x2, dst_y2 = x_off + rw, y_off + rh
                     
-                    container[y_off:y_off+rh_fit, x_off:x_off+rw_fit] = resized_crop[:rh_fit, :rw_fit]
+                    # Handle Negative Start (Source larger than Dest)
+                    if dst_x1 < 0:
+                        src_x1 -= dst_x1
+                        dst_x1 = 0
+                    if dst_y1 < 0:
+                        src_y1 -= dst_y1
+                        dst_y1 = 0
+                        
+                    # Handle Exceeding End
+                    if dst_x2 > cw:
+                        src_x2 -= (dst_x2 - cw)
+                        dst_x2 = cw
+                    if dst_y2 > ch:
+                        src_y2 -= (dst_y2 - ch)
+                        dst_y2 = ch
+                        
+                    # Copy if valid
+                    if src_x2 > src_x1 and src_y2 > src_y1:
+                        container[dst_y1:dst_y2, dst_x1:dst_x2] = resized_crop[src_y1:src_y2, src_x1:src_x2]
+
                     rotated = container
                     
-                    # Track tight content box (relative to container)
-                    content_box_rel = [x_off, y_off, x_off+rw_fit, y_off+rh_fit]
+                    # Track tight content box (relative to container) - Use Clipped Coords
+                    content_box_rel = [dst_x1, dst_y1, dst_x2, dst_y2]
 
-                elif cls_id in [1, 2] and not (cls_id == 2 and col_idx == 1):
-                     # Standard Logic for Capacitor/Inductor (Column 0 or Single)
+                elif cls_id in [0, 1, 2, 3, 4]:
+                     # Standard Logic for All Classes (Column 0 or Single)
                      # Centered in square container, NO SCALING (1.0x)
                      
                      h, w = self.best_crops[cls_id].shape[:2]
@@ -374,9 +441,9 @@ class MatrixGenerator:
                 final_rel_box = list(content_box_rel)
                 
                 # Apply rotation/swap logic ONLY for Standard Column (which processes unrotated container)
-                # Multi-Scale Column (Inductor Col 1) already has fully rotated content_box_rel.
+                # Multi-Scale Column already has fully rotated content_box_rel.
                 
-                needs_swap = (cls_id in [1, 2]) and not (cls_id == 2 and col_idx == 1)
+                needs_swap = (cls_id in [0, 1, 2, 3, 4]) and not (cls_id in [0, 1, 2, 3, 4] and col_idx == 1)
                 
                 if needs_swap:
                      # Re-calculate based on rotated size if 90/270
@@ -496,8 +563,10 @@ def main():
     # Enable ALL Classes
     # TARGET_CLASSES = list(CLASSES.keys())
     
-    # DEBUG: Process ONLY Inductor (Class 2) for Tuning
-    TARGET_CLASSES = [2]
+    # TARGET_CLASSES = list(CLASSES.keys())
+    
+    # Process ONLY FA DC (Class 3) for Verification
+    TARGET_CLASSES = [3] 
     
     # SEQUENTIAL LOOP: Class -> Image
     for target_cls in TARGET_CLASSES:
@@ -519,11 +588,20 @@ def main():
         # Per-Class Confidence Overrides
         current_conf = config.confidence_threshold
         if target_cls == 1: # Capacitor
-            current_conf = 0.30
+            current_conf = 0.40
             print(f"  [INFO] Capacitor: Lowering confidence threshold to {current_conf}")
         elif target_cls == 2: # Inductor
             current_conf = 0.40
             print(f"  [INFO] Inductor: Lowering confidence threshold to {current_conf}")
+        elif target_cls == 0: # Resistor
+            current_conf = 0.60
+            print(f"  [INFO] Resistor: Setting confidence threshold to {current_conf}")
+        elif target_cls == 3: # FA DC
+            current_conf = 0.15
+            print(f"  [INFO] FA DC: Lowering confidence threshold to {current_conf}")
+        elif target_cls == 4: # FA AC
+            current_conf = 0.55
+            print(f"  [INFO] FA AC: Setting confidence threshold to {current_conf}")
             
         print(f"Initializing SAM3 Model for {cls_name} (Conf: {current_conf})...")
         sam_model = SAM3Model(
@@ -549,6 +627,10 @@ def main():
                 
                 img_id = filename_to_id.get(target_filename, 0)
                 
+                # Filter removed for production run
+                # if "electrical_242" not in target_filename:
+                #      continue
+
                 target_img = cv2.imread(str(target_path))
                 if target_img is None: 
                     print(f"  Failed to read image {target_path}")
@@ -570,15 +652,28 @@ def main():
                 
                 # Target Scale Ratio
                 # Default: 1.0 (Match target height)
-                # Capacitor (Class 1) & Inductor (Class 2): 0.75 (User Request to reduce size relative to target)
+                # Capacitor (Class 1): 0.75 (User Request to reduce size relative to target)
                 
-                if target_cls in [1, 2]:
-                    TARGET_REF_SCALE_RATIO = 0.75
+                if target_cls in [0, 1, 2, 3, 4]:
+                    # Adaptive Scaling: Match Target Height (User Request)
+                    # Use 1.0 ratio to scale reference up/down with target image.
+                    TARGET_REF_SCALE_RATIO = 1.0
                 else:
                     TARGET_REF_SCALE_RATIO = 1.0
                     
-                target_strip_h = int(t_h * TARGET_REF_SCALE_RATIO)
+                if TARGET_REF_SCALE_RATIO is None:
+                    # Fixed Native Height
+                    target_strip_h = m_h_base
+                else:
+                    # Relative Height
+                    target_strip_h = int(t_h * TARGET_REF_SCALE_RATIO)
                 
+                # SAFETY CLAMP: Ensure reference strip does not exceed target image height
+                # (Prevents broadcast errors on very small images)
+                if target_strip_h > t_h:
+                    print(f"  [WARN] constrained ref height {target_strip_h} to target height {t_h}")
+                    target_strip_h = t_h
+
                 scale = target_strip_h / m_h_base
                 new_m_w = int(m_w_base * scale)
                 new_m_h_content = target_strip_h
@@ -587,6 +682,7 @@ def main():
                 matrix_img_content = cv2.resize(matrix_img_strip, (new_m_w, new_m_h_content), interpolation=cv2.INTER_LINEAR)
                 
                 # Create Padded Strip (Full Target Height)
+                # Since we clamped target_strip_h <= t_h, this is safe.
                 matrix_img_scaled = np.ones((t_h, new_m_w, 3), dtype=np.uint8) * 255
                 
                 # Center Vertically
@@ -594,14 +690,26 @@ def main():
                 matrix_img_scaled[y_offset:y_offset+new_m_h_content, :] = matrix_img_content
                 
                 matrix_info_scaled = []
+                matrix_info_scaled = []
+                # Margin for prompts to avoid being too tight after scaling
+                # REVERT: Margin seemed to hurt performance? Testing with 0.
+                PROMPT_MARGIN = 0 
+                print(f"  [DEBUG] Scaling Reference: Ratio={target_strip_h/m_h_base:.3f} (Base: {m_h_base}x{m_w_base} -> New: {target_strip_h}x{new_m_w})")
+
                 for cell in matrix_info_strip:
                     x1, y1, x2, y2 = cell['box']
                     nx1, ny1, nx2, ny2 = int(x1*scale), int(y1*scale), int(x2*scale), int(y2*scale)
                     
-                    # Apply Vertical Offset due to Padding
+                    # Apply Vertical Offset
                     ny1 += y_offset
                     ny2 += y_offset
                     
+                    # Relax the box slightly
+                    nx1 = max(0, nx1 - PROMPT_MARGIN)
+                    ny1 = max(0, ny1 - PROMPT_MARGIN)
+                    nx2 = min(new_m_w, nx2 + PROMPT_MARGIN)
+                    ny2 = min(target_strip_h + y_offset, ny2 + PROMPT_MARGIN) # Ensure inside content area
+
                     matrix_info_scaled.append({
                         'class_id': cell['class_id'],
                         'box': [nx1, ny1, nx2, ny2]
@@ -704,7 +812,8 @@ def main():
                         valid_count += 1
                         
                         # Draw detection
-                        label_text = f"{cls_name} {score:.2f}"
+                        # Simplified Label: Score ONLY (User Request)
+                        label_text = f"{score:.2f}"
                         cv2.rectangle(result_vis, (int(nx1), int(ny1)), (int(nx2), int(ny2)), (0, 255, 0), 2)
                         cv2.putText(result_vis, label_text, (int(nx1), int(ny1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                 
