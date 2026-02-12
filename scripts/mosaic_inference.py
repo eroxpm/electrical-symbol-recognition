@@ -96,9 +96,10 @@ def draw_boxes(image: np.ndarray, boxes: List[List[float]], color=(0, 255, 0), t
 class MatrixGenerator:
     """Generates the Visual Prompt Matrix using COCO data."""
     
-    def __init__(self, images_dir: Path, coco_anns: Dict, filename_to_id: Dict, ref_filenames: List[str]):
+    def __init__(self, images_dir: Path, coco_anns: Dict, coco_images: Dict, filename_to_id: Dict, ref_filenames: List[str]):
         self.images_dir = images_dir
         self.coco_anns = coco_anns
+        self.coco_images = coco_images # ID -> Image Info
         self.filename_to_id = filename_to_id
         self.ref_filenames = ref_filenames
         self.best_crops: Dict[int, np.ndarray] = {}
@@ -113,29 +114,100 @@ class MatrixGenerator:
 
         needed_classes = set(CLASSES.keys())
         
-        # We look for files named class_{id}_*.jpg
+        # We look for files named class_{cls_id}_{cls_name}_{img_id}_{ann_id}.jpg
+        # Example: class_0_Resistor_1_2.jpg -> cls=0, img_id=1, ann_id=2
         all_debug_files = list(DEBUG_CLASSES_DIR.glob("*.jpg"))
         
+        all_debug_files = list(DEBUG_CLASSES_DIR.glob("*.jpg"))
+        
+        # --- CUSTOM CAPACITOR OVERRIDE ---
+        # User requested specific file: data/input/reference_images/class_1_Capacitor_1_1.jpg
+        custom_cap_path = PROJECT_ROOT / "data/input/reference_images/class_1_Capacitor_1_1.jpg"
+        if 1 in needed_classes and custom_cap_path.exists():
+            print(f"  [INFO] Capacitor (Class 1): Using custom reference {custom_cap_path.name}")
+            custom_img = cv2.imread(str(custom_cap_path))
+            if custom_img is not None:
+                self.best_crops[1] = custom_img
+                needed_classes.remove(1)
+            else:
+                print(f"  [WARN] Failed to read custom capacitor image")
+        # ---------------------------------
+
+        # --- CUSTOM INDUCTOR OVERRIDE ---
+        # User requested specific file logic similar to capacitor
+        # Candidates: class_2_Inductor_1_3.jpg
+        custom_ind_path = PROJECT_ROOT / "data/input/reference_images/class_2_Inductor_1_3.jpg"
+        if 2 in needed_classes and custom_ind_path.exists():
+            print(f"  [INFO] Inductor (Class 2): Using custom reference {custom_ind_path.name}")
+            custom_img_ind = cv2.imread(str(custom_ind_path))
+            if custom_img_ind is not None:
+                self.best_crops[2] = custom_img_ind
+                needed_classes.remove(2)
+            else:
+                print(f"  [WARN] Failed to read custom inductor image")
+        # --------------------------------
+
         for cls_id in list(needed_classes):
-            # Find all images for this class
             prefix = f"class_{cls_id}_"
             cls_images = [f for f in all_debug_files if f.name.startswith(prefix)]
             
             if cls_images:
                 # Use the first one found
-                img_path = cls_images[0]
-                img = cv2.imread(str(img_path))
-                if img is not None:
-                    self.best_crops[cls_id] = img
-                    needed_classes.remove(cls_id)
-                    print(f"  Got Class {cls_id} from {img_path.name}")
-                else:
-                    print(f"  [WARN] Failed to read debug image {img_path}")
-            else:
-                print(f"  [WARN] No debug image found for Class {cls_id} with prefix {prefix}")
-        
-        print(f"  Final crops for classes: {list(self.best_crops.keys())}")
-
+                debug_path = cls_images[0]
+                debug_filename = debug_path.name
+                
+                try:
+                    parts = debug_filename.replace(".jpg", "").split("_")
+                    # parts: ['class', '0', 'Resistor', '1', '2']
+                    # We need img_id (index -2) and ann_id (index -1)
+                    img_id = int(parts[-2])
+                    ann_id = int(parts[-1])
+                    
+                    # Look up original image filename
+                    if img_id in self.coco_images:
+                         img_info = self.coco_images[img_id]
+                         src_filename = img_info['file_name']
+                         src_path = self.images_dir / src_filename
+                         
+                         src_img = cv2.imread(str(src_path))
+                         if src_img is None:
+                             print(f"  [WARN] Failed to read source image {src_path}")
+                             continue
+                             
+                         # Find the specific annotation
+                         target_ann = None
+                         if img_id in self.coco_anns:
+                             for ann in self.coco_anns[img_id]:
+                                 if ann['id'] == ann_id:
+                                     target_ann = ann
+                                     break
+                         
+                         if target_ann:
+                             x, y, w, h = map(float, target_ann['bbox'])
+                             
+                             # 15% Expansion Logic (EXCEPT for Resistor - Class 0)
+                             if cls_id == 0:
+                                 margin_w = 0
+                                 margin_h = 0
+                                 print(f"  [INFO] Resistor (Class 0): Using TIGHT crop (0% expansion).")
+                             else:
+                                 margin_w = w * 0.15
+                                 margin_h = h * 0.15
+                             
+                             x1 = int(max(0, x - margin_w))
+                             y1 = int(max(0, y - margin_h))
+                             x2 = int(min(src_img.shape[1], x + w + margin_w))
+                             y2 = int(min(src_img.shape[0], y + h + margin_h))
+                             
+                             if x2 > x1 and y2 > y1:
+                                 crop = src_img[y1:y2, x1:x2]
+                                 self.best_crops[cls_id] = crop
+                                 needed_classes.remove(cls_id)
+                                 print(f"  Got Class {cls_id} from {src_filename} (Expanded Crop)")
+                                 continue
+                except Exception as e:
+                     print(f"  [WARN] Failed to parse/process {debug_filename}: {e}")
+                
     def generate_matrix(self, target_cls: Optional[int] = None) -> Tuple[np.ndarray, List[List[Any]]]:
         """Creates reference strip. If target_cls provided, 1 col. Else 5 cols."""
         rows = 4 
@@ -143,11 +215,30 @@ class MatrixGenerator:
         if target_cls is not None:
              cols = 1
              classes_to_render = [target_cls]
+             
+             # INDUCTOR SPECIAL: 2 Columns (Standard + Scaled)
+             if target_cls == 2:
+                 cols = 2
+                 classes_to_render = [2, 2] # Render Class 2 twice
         else:
              cols = 5
              classes_to_render = range(5)
              
         cw, ch = MATRIX_CROP_SIZE
+        
+        # Dynamic Size for Capacitor (Class 1) & Inductor (Class 2)
+        if (target_cls == 1 or target_cls == 2) and target_cls in self.best_crops:
+             crop = self.best_crops[target_cls]
+             h, w = crop.shape[:2]
+             s = max(h, w)
+             
+             # For Inductor, we need extra space for 1.25x scale
+             if target_cls == 2:
+                 s = int(s * 1.25)
+                 
+             cw, ch = s, s # Use native max dim (square)
+             print(f"  [INFO] {CLASSES.get(target_cls)} Matrix: Using dynamic size {cw}x{ch}")
+        
         pad = MATRIX_PADDING
         
         matrix_h = rows * (ch + pad) + pad
@@ -162,23 +253,167 @@ class MatrixGenerator:
                 continue
                 
             base_crop = self.best_crops[cls_id]
-            base_crop = cv2.resize(base_crop, MATRIX_CROP_SIZE)
+            
+            # Special resize logic for Capacitor (1) and Inductor (2)
+            if cls_id in [1, 2]:
+                
+                # Check for Multi-Scale Column (Inductor, Column 1)
+                is_multiscale_col = (cls_id == 2 and col_idx == 1)
+                
+                # Expand base crop for 1.25x scale if needed? 
+                # Actually, we resize/place into container below.
+                pass 
+            else:
+                base_crop = cv2.resize(base_crop, (cw, ch))
             
             for r in range(4): # Rows
-                if r == 0: rotated = base_crop
-                elif r == 1: rotated = cv2.rotate(base_crop, cv2.ROTATE_90_CLOCKWISE)
-                elif r == 2: rotated = cv2.rotate(base_crop, cv2.ROTATE_180)
-                elif r == 3: rotated = cv2.rotate(base_crop, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                img_to_rotate = base_crop # Default
                 
-                # Fixed x_offset calculation based on column index (0 for single col)
+                # INDUCTOR MULTI-SCALE LOGIC (Column 1)
+                if cls_id == 2 and col_idx == 1:
+                    # Row 0: 0.75x (0 deg)
+                    # Row 1: 0.75x (90 deg)
+                    # Row 2: 1.25x (0 deg)
+                    # Row 3: 1.25x (90 deg)
+                    
+                    scale_factor = 1.0
+                    rot_code = None
+                    
+                    if r == 0: scale_factor = 0.75; rot_code = None
+                    elif r == 1: scale_factor = 0.75; rot_code = cv2.ROTATE_90_CLOCKWISE
+                    elif r == 2: scale_factor = 1.25; rot_code = None
+                    elif r == 3: scale_factor = 1.25; rot_code = cv2.ROTATE_90_CLOCKWISE
+                    
+                    # Resize Base Crop
+                    h, w = self.best_crops[cls_id].shape[:2]
+                    new_h, new_w = int(h * scale_factor), int(w * scale_factor)
+                    resized_crop = cv2.resize(self.best_crops[cls_id], (new_w, new_h))
+                    
+                    if rot_code is not None:
+                        resized_crop = cv2.rotate(resized_crop, rot_code)
+                        
+                    # Place in Container (cw, ch) - Center
+                    rh, rw = resized_crop.shape[:2]
+                    container = np.ones((ch, cw, 3), dtype=np.uint8) * 255
+                    
+                    y_off = (ch - rh) // 2
+                    x_off = (cw - rw) // 2
+                    
+                    # Clip if needed (though cw, ch should be big enough)
+                    rh_fit = min(rh, ch)
+                    rw_fit = min(rw, cw)
+                    
+                    container[y_off:y_off+rh_fit, x_off:x_off+rw_fit] = resized_crop[:rh_fit, :rw_fit]
+                    rotated = container
+                    
+                    # Track tight content box (relative to container)
+                    content_box_rel = [x_off, y_off, x_off+rw_fit, y_off+rh_fit]
+
+                elif cls_id in [1, 2] and not (cls_id == 2 and col_idx == 1):
+                     # Standard Logic for Capacitor/Inductor (Column 0 or Single)
+                     # Centered in square container, NO SCALING (1.0x)
+                     
+                     h, w = self.best_crops[cls_id].shape[:2]
+                     container = np.ones((ch, cw, 3), dtype=np.uint8) * 255
+                     y_off = (ch - h) // 2
+                     x_off = (cw - w) // 2
+                     h_fit = min(h, ch)
+                     w_fit = min(w, cw)
+                     container[y_off:y_off+h_fit, x_off:x_off+w_fit] = self.best_crops[cls_id][:h_fit, :w_fit]
+                     
+                     container[y_off:y_off+h_fit, x_off:x_off+w_fit] = self.best_crops[cls_id][:h_fit, :w_fit]
+                     
+                     img_to_rotate = container
+                     
+                     # Track tight content box (relative to container)
+                     # Note: This is pre-rotation. If we rotate 90/270, we might need to swap dims.
+                     # But here the container is square (cw=ch), and we center.
+                     # The rotated image is the container rotated against its center.
+                     # So the content box also rotates.
+                     
+                     # Let's simplify: 
+                     # For standard/centered content, the box is centered.
+                     # If we rotate the container, the content rotates with it.
+                     # Calculating the new box after rotation is complex if we just rotate the image.
+                     # BUT: standard rotations of a centered object in a square container...
+                     # 0/180: w, h are same dims.
+                     # 90/270: w becomes h, h becomes w.
+                     # Offsets change to re-center.
+                     
+                     # Logic below handles rotation of `rotated` image.
+                     # To get tight box, we should probably calculate it AFTER rotation?
+                     # OR just rely on the fact that we know the size and it's centered.
+                     pass
+                     
+                     content_box_rel = [x_off, y_off, x_off+w_fit, y_off+h_fit] # Initial
+                     
+                     if r == 0: rotated = img_to_rotate
+                     elif r == 1: rotated = cv2.rotate(img_to_rotate, cv2.ROTATE_90_CLOCKWISE)
+                     elif r == 2: rotated = cv2.rotate(img_to_rotate, cv2.ROTATE_180)
+                     elif r == 3: rotated = cv2.rotate(img_to_rotate, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+                else:
+                    # Standard logic for other classes
+                    if r == 0: rotated = base_crop
+                    elif r == 1: rotated = cv2.rotate(base_crop, cv2.ROTATE_90_CLOCKWISE)
+                    elif r == 2: rotated = cv2.rotate(base_crop, cv2.ROTATE_180)
+                    elif r == 3: rotated = cv2.rotate(base_crop, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    
+                    # For standard resizing (else block), the content fills the cell (cw, ch)
+                    content_box_rel = [0, 0, cw, ch]
+                
+                # Calculate Final Tight Box in Matrix Coordinates
+                # content_box_rel is [bx1, by1, bx2, by2] inside the cell (cw x ch)
+                
+                # If we rotated the container/image, we need to adjust content_box_rel?
+                # For Inductor/Capacitor:
+                # We essentially re-centered or the rotation handled it.
+                # If we use cv2.rotate on the container, the content rotates.
+                # For 90/270, w and h swap.
+                
+                final_rel_box = list(content_box_rel)
+                
+                # Apply rotation/swap logic ONLY for Standard Column (which processes unrotated container)
+                # Multi-Scale Column (Inductor Col 1) already has fully rotated content_box_rel.
+                
+                needs_swap = (cls_id in [1, 2]) and not (cls_id == 2 and col_idx == 1)
+                
+                if needs_swap:
+                     # Re-calculate based on rotated size if 90/270
+                     # We know the content size (rh, rw) or (h, w).
+                     # And it's always centered in (cw, ch).
+                     
+                     # Current content dims
+                     curr_w = content_box_rel[2] - content_box_rel[0]
+                     curr_h = content_box_rel[3] - content_box_rel[1]
+                     
+                     if r in [1, 3]: # 90 or 270
+                         # Swap dims
+                         tmp = curr_w
+                         curr_w = curr_h
+                         curr_h = tmp
+                         
+                     # Re-center
+                     new_x_off = (cw - curr_w) // 2
+                     new_y_off = (ch - curr_h) // 2
+                     final_rel_box = [new_x_off, new_y_off, new_x_off+curr_w, new_y_off+curr_h]
+
+                
+                # Fixed x_offset calculation based on column index
                 x_offset = pad + col_idx * (cw + pad)
                 y_offset = pad + r * (ch + pad)
                 
                 matrix_img[y_offset:y_offset+ch, x_offset:x_offset+cw] = rotated
                 
+                # Absolute Box
+                abs_x1 = x_offset + final_rel_box[0]
+                abs_y1 = y_offset + final_rel_box[1]
+                abs_x2 = x_offset + final_rel_box[2]
+                abs_y2 = y_offset + final_rel_box[3]
+
                 grid_info.append({
                     'class_id': cls_id,
-                    'box': [x_offset, y_offset, x_offset+cw, y_offset+ch], 
+                    'box': [abs_x1, abs_y1, abs_x2, abs_y2], 
                     'rotation': r * 90
                 })
                 
@@ -227,21 +462,27 @@ def main():
     all_raw_annotations = [] # Accumulate ALL detections here first
     out_ann_id = 1
     
-    # 1. Load Model
-    config = get_config()
-    print(f"Initializing SAM3 Model: {config.model_id}")
-    sam_model = SAM3Model(
-        model_id=config.model_id,
-        confidence_threshold=config.confidence_threshold,
-        mask_threshold=config.mask_threshold,
-        device=config.device,
-        hf_token=config.hf_token
-    )
-    sam_model.initialize()
-
-    # 2. Phase A: Extract crops for Reference Strips
-    gen = MatrixGenerator(IMAGES_DIR, coco_anns_lookup, filename_to_id, REFERENCE_FILENAMES)
+    # 1. Phase A: Generate ALL Reference Strips (Before Inference)
+    print("Phase A: Generating all reference strips...")
+    gen = MatrixGenerator(IMAGES_DIR, coco_anns_lookup, coco_images, filename_to_id, REFERENCE_FILENAMES)
     gen.extract_best_crops()
+    
+    precomputed_strips = {}
+    
+    for cls_id, cls_name in CLASSES.items():
+        # Generate Strip
+        matrix_img_strip, matrix_info_strip = gen.generate_matrix(target_cls=cls_id)
+        
+        if not matrix_info_strip:
+             print(f"  [WARN] No reference crops found for {cls_name}. Skipping.")
+             continue
+             
+        # Save Strip
+        strip_save_path = REF_DIR / f"reference_{cls_name}.jpg"
+        cv2.imwrite(str(strip_save_path), matrix_img_strip)
+        print(f"  Saved Reference Strip to {strip_save_path}")
+        
+        precomputed_strips[cls_id] = (matrix_img_strip, matrix_info_strip)
     
     # 3. Phase B: Sequential Inference Loop
     all_files = list(IMAGES_DIR.glob("*.jpg"))
@@ -253,12 +494,46 @@ def main():
     print(f"Found {len(targets)} Target images.")
 
     # Enable ALL Classes
-    TARGET_CLASSES = list(CLASSES.keys())
+    # TARGET_CLASSES = list(CLASSES.keys())
+    
+    # DEBUG: Process ONLY Inductor (Class 2) for Tuning
+    TARGET_CLASSES = [2]
     
     # SEQUENTIAL LOOP: Class -> Image
     for target_cls in TARGET_CLASSES:
         cls_name = CLASSES.get(target_cls, f"class_{target_cls}")
+        
+
+
         print(f"\n=== Processing Class: {cls_name} ({target_cls}) ===")
+        
+        if target_cls not in precomputed_strips:
+            print(f"Skipping {cls_name} (No reference strip)")
+            continue
+            
+        matrix_img_strip, matrix_info_strip = precomputed_strips[target_cls]
+
+        # Initialize Model Per Class
+        config = get_config()
+        
+        # Per-Class Confidence Overrides
+        current_conf = config.confidence_threshold
+        if target_cls == 1: # Capacitor
+            current_conf = 0.30
+            print(f"  [INFO] Capacitor: Lowering confidence threshold to {current_conf}")
+        elif target_cls == 2: # Inductor
+            current_conf = 0.40
+            print(f"  [INFO] Inductor: Lowering confidence threshold to {current_conf}")
+            
+        print(f"Initializing SAM3 Model for {cls_name} (Conf: {current_conf})...")
+        sam_model = SAM3Model(
+            model_id=config.model_id,
+            confidence_threshold=current_conf,
+            mask_threshold=config.mask_threshold,
+            device=config.device,
+            hf_token=config.hf_token
+        )
+        sam_model.initialize()
         
         cls_output_dir = OUTPUT_DIR / cls_name
         cls_process_dir = cls_output_dir / "process"
@@ -269,18 +544,6 @@ def main():
         cls_result_dir.mkdir(parents=True, exist_ok=True)
         
         try:
-            # Generator Single Column for this class
-            matrix_img_strip, matrix_info_strip = gen.generate_matrix(target_cls=target_cls)
-            
-            # Helper: Check if strip is valid (not empty/white)
-            if not matrix_info_strip:
-                 print(f"  [WARN] No reference crops found for {cls_name}. Skipping generation of reference strip.")
-            else:
-                 # User Request: Save the reference strip to reference directory
-                 strip_save_path = REF_DIR / f"reference_{cls_name}.jpg"
-                 cv2.imwrite(str(strip_save_path), matrix_img_strip)
-                 print(f"  Saved Reference Strip to {strip_save_path}")
-
             for target_path in targets:
                 target_filename = target_path.name
                 
@@ -302,18 +565,43 @@ def main():
                         "width": t_w
                     }
 
-                # Dynamic Scaling of the Strip
+                # Dynamic Scaling of the Strip with Padding
                 m_h_base, m_w_base = matrix_img_strip.shape[:2]
-                scale = t_h / m_h_base
-                new_m_w = int(m_w_base * scale)
-                new_m_h = t_h
                 
-                matrix_img_scaled = cv2.resize(matrix_img_strip, (new_m_w, new_m_h), interpolation=cv2.INTER_LINEAR)
+                # Target Scale Ratio
+                # Default: 1.0 (Match target height)
+                # Capacitor (Class 1) & Inductor (Class 2): 0.75 (User Request to reduce size relative to target)
+                
+                if target_cls in [1, 2]:
+                    TARGET_REF_SCALE_RATIO = 0.75
+                else:
+                    TARGET_REF_SCALE_RATIO = 1.0
+                    
+                target_strip_h = int(t_h * TARGET_REF_SCALE_RATIO)
+                
+                scale = target_strip_h / m_h_base
+                new_m_w = int(m_w_base * scale)
+                new_m_h_content = target_strip_h
+                
+                # Resize Content
+                matrix_img_content = cv2.resize(matrix_img_strip, (new_m_w, new_m_h_content), interpolation=cv2.INTER_LINEAR)
+                
+                # Create Padded Strip (Full Target Height)
+                matrix_img_scaled = np.ones((t_h, new_m_w, 3), dtype=np.uint8) * 255
+                
+                # Center Vertically
+                y_offset = (t_h - new_m_h_content) // 2
+                matrix_img_scaled[y_offset:y_offset+new_m_h_content, :] = matrix_img_content
                 
                 matrix_info_scaled = []
                 for cell in matrix_info_strip:
                     x1, y1, x2, y2 = cell['box']
                     nx1, ny1, nx2, ny2 = int(x1*scale), int(y1*scale), int(x2*scale), int(y2*scale)
+                    
+                    # Apply Vertical Offset due to Padding
+                    ny1 += y_offset
+                    ny2 += y_offset
+                    
                     matrix_info_scaled.append({
                         'class_id': cell['class_id'],
                         'box': [nx1, ny1, nx2, ny2]
@@ -338,26 +626,39 @@ def main():
                     cv2.rectangle(prompt_vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     prompt_ref_size = (x2 - x1, y2 - y1)
                 
+                # DEBUG: Save Prompt Visualization
+                debug_prompt_path = cls_process_dir / f"{target_filename}_prompts.jpg"
+                cv2.imwrite(str(debug_prompt_path), prompt_vis)
+                print(f"  [DEBUG] Saved prompt visualization to {debug_prompt_path}")
+                print(f"  [DEBUG] Active Prompts: {active_prompts}")
+                
                 if not active_prompts: 
                     del target_img, canvas, canvas_pil
                     continue
 
-                # Run SAM with no_grad explicit wrapper (just in case model wrapper doesn't cover everything)
-                with torch.no_grad():
-                     res = sam_model.predict_with_boxes(
+                # INFERENCE
+                try:
+                    res = sam_model.predict_with_boxes(
                         image=canvas_pil,
                         boxes_xyxy=active_prompts,
                         labels=active_labels
                     )
-                
+                except Exception as e:
+                     print(f"Model Inference Failed for {target_filename}: {e}")
+                     continue
+
                 d_boxes = res.get('boxes', [])
-                scores = res.get('scores', []) 
+                scores = res.get('scores', [])
                 
-                if torch.is_tensor(d_boxes): d_boxes = d_boxes.cpu().numpy().tolist()
-                if torch.is_tensor(scores): scores = scores.cpu().numpy().tolist()
+                # Check Scores
+                if torch.is_tensor(scores):
+                    if scores.numel() == 0:
+                        scores = []
+                    else:
+                        scores = scores.tolist()
                 
-                if len(scores) != len(d_boxes):
-                    scores = [1.0] * len(d_boxes)
+                if not scores: 
+                     scores = [1.0] * len(d_boxes)
 
                 # Process Results (RAW)
                 result_vis = target_img.copy()
@@ -367,6 +668,9 @@ def main():
                     x1, y1, x2, y2 = box
                     score = scores[i]
                     cx = (x1 + x2) / 2
+                    
+                    # Coordinate Shift (new_m_w is already the scaled width from above)
+                    # Do NOT redefine it using matrix_img_strip.shape[1]
                     
                     if cx > new_m_w:
                         nx1 = max(0, x1 - new_m_w)
@@ -379,13 +683,12 @@ def main():
                         
                         # Size Filtering (2x)
                         ref_w, ref_h = prompt_ref_size
-                        max_w = ref_w * 2
+                        
+                        max_w = ref_w * 2 
                         max_h = ref_h * 2
                         
                         if nw > max_w or nh > max_h:
                             continue
-                        
-                        # Store Raw Detection
                         ann_entry = {
                             "id": out_ann_id,
                             "image_id": img_id,
@@ -400,14 +703,21 @@ def main():
                         out_ann_id += 1
                         valid_count += 1
                         
-                        # Draw detection on result_vis
+                        # Draw detection
                         label_text = f"{cls_name} {score:.2f}"
                         cv2.rectangle(result_vis, (int(nx1), int(ny1)), (int(nx2), int(ny2)), (0, 255, 0), 2)
                         cv2.putText(result_vis, label_text, (int(nx1), int(ny1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                 
                 # Save Input Visualization (Process) - Always
-                process_view = canvas.copy()
-                process_view[:, :new_m_w, :] = prompt_vis
+                # Re-create process view (canvas from RGB to BGR)
+                process_view = cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_RGB2BGR)
+                
+                # Overlay the prompt elements (green boxes) on the left side
+                if prompt_vis is not None and process_view.shape[0] == prompt_vis.shape[0]:
+                     # Ensure width matches new_m_w
+                     valid_w = min(new_m_w, prompt_vis.shape[1])
+                     process_view[:, :valid_w, :] = prompt_vis[:, :valid_w, :]
+
                 cv2.imwrite(str(cls_process_dir / f"{target_filename}_input.jpg"), process_view)
                 
                 # Save Result Visualization (Result) - Always
@@ -425,9 +735,13 @@ def main():
             traceback.print_exc()
         finally:
             # Force cleanup after class
+            print(f"Cleaning up model for {cls_name}...")
+            del sam_model
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+        # End of Image Loop for this Class -> Save Per-Class JSON
 
         # End of Image Loop for this Class -> Save Per-Class JSON
         cls_json_path = cls_result_dir / f"_results_{cls_name}.json"
