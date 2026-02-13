@@ -33,7 +33,7 @@ DEBUG_CLASSES_DIR = DATA_DIR / "debug_classes"
 IMAGES_DIR = TARGET_DIR # Source images for Inference
 ANNOTATIONS_PATH = DATA_DIR / "_annotations.coco.json"
 
-OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
+OUTPUT_DIR = PROJECT_ROOT / "data" / "output_v2"
 OUTPUT_JSON_PATH = OUTPUT_DIR / "_results.coco.json"
 
 # Clean Setup
@@ -563,10 +563,8 @@ def main():
     # Enable ALL Classes
     # TARGET_CLASSES = list(CLASSES.keys())
     
-    # TARGET_CLASSES = list(CLASSES.keys())
-    
-    # Process ONLY FA DC (Class 3) for Verification
-    TARGET_CLASSES = [3] 
+    # Process ALL Classes
+    TARGET_CLASSES = list(CLASSES.keys())
     
     # SEQUENTIAL LOOP: Class -> Image
     for target_cls in TARGET_CLASSES:
@@ -690,11 +688,10 @@ def main():
                 matrix_img_scaled[y_offset:y_offset+new_m_h_content, :] = matrix_img_content
                 
                 matrix_info_scaled = []
-                matrix_info_scaled = []
                 # Margin for prompts to avoid being too tight after scaling
                 # REVERT: Margin seemed to hurt performance? Testing with 0.
                 PROMPT_MARGIN = 0 
-                print(f"  [DEBUG] Scaling Reference: Ratio={target_strip_h/m_h_base:.3f} (Base: {m_h_base}x{m_w_base} -> New: {target_strip_h}x{new_m_w})")
+                # print(f"  [DEBUG] Scaling Reference: Ratio={target_strip_h/m_h_base:.3f} (Base: {m_h_base}x{m_w_base} -> New: {target_strip_h}x{new_m_w})")
 
                 for cell in matrix_info_strip:
                     x1, y1, x2, y2 = cell['box']
@@ -737,8 +734,8 @@ def main():
                 # DEBUG: Save Prompt Visualization
                 debug_prompt_path = cls_process_dir / f"{target_filename}_prompts.jpg"
                 cv2.imwrite(str(debug_prompt_path), prompt_vis)
-                print(f"  [DEBUG] Saved prompt visualization to {debug_prompt_path}")
-                print(f"  [DEBUG] Active Prompts: {active_prompts}")
+                # print(f"  [DEBUG] Saved prompt visualization to {debug_prompt_path}")
+                # print(f"  [DEBUG] Active Prompts: {active_prompts}")
                 
                 if not active_prompts: 
                     del target_img, canvas, canvas_pil
@@ -851,8 +848,6 @@ def main():
                 torch.cuda.empty_cache()
 
         # End of Image Loop for this Class -> Save Per-Class JSON
-
-        # End of Image Loop for this Class -> Save Per-Class JSON
         cls_json_path = cls_result_dir / f"_results_{cls_name}.json"
         
         # Filter annotations for this class to save intermediate json
@@ -935,6 +930,58 @@ def main():
     
     with open(OUTPUT_JSON_PATH, 'w') as f:
         json.dump(final_json, f, indent=4)
+        
+    # 6. Generate Combined Visualization Images
+    print("Generating combined visualization images...")
+    FINAL_COMBINED_DIR = OUTPUT_DIR / "final_combined"
+    FINAL_COMBINED_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Map class ID to Color (BGR)
+    CLASS_COLORS = {
+        0: (255, 0, 0),    # Resistor: Blue
+        1: (0, 255, 0),    # Capacitor: Green
+        2: (0, 0, 255),    # Inductor: Red
+        3: (255, 255, 0),  # FA DC: Cyan
+        4: (0, 255, 255)   # FA AC: Yellow
+    }
+    
+    # Re-group final NMS annotations by Image ID
+    final_anns_by_img = {}
+    for ann in final_annotations:
+        img_id = ann['image_id']
+        if img_id not in final_anns_by_img: final_anns_by_img[img_id] = []
+        final_anns_by_img[img_id].append(ann)
+        
+    for img_id, img_info in out_images_dict.items():
+        filename = img_info['file_name']
+        src_path = IMAGES_DIR / filename
+        
+        if not src_path.exists():
+            continue
+            
+        img = cv2.imread(str(src_path))
+        if img is None: continue
+        
+        if img_id in final_anns_by_img:
+            for ann in final_anns_by_img[img_id]:
+                x, y, w, h = map(int, ann['bbox'])
+                cls_id = ann['category_id']
+                score = ann['score']
+                color = CLASS_COLORS.get(cls_id, (255, 255, 255))
+                cls_name = CLASSES.get(cls_id, str(cls_id))
+                
+                # Draw Box
+                cv2.rectangle(img, (x, y), (x+w, y+h), color, 2)
+                
+                # Draw Label
+                label = f"{cls_name}: {score:.2f}"
+                cv2.putText(img, label, (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
+        # SaveCombined Image
+        out_path = FINAL_COMBINED_DIR / filename
+        cv2.imwrite(str(out_path), img)
+        
+    print(f"Saved combined images to {FINAL_COMBINED_DIR}")
         
     print(f"Inference Complete. All results saved to {OUTPUT_DIR}")
 
