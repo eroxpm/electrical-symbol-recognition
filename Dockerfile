@@ -1,14 +1,14 @@
 # Electrical Symbol Recognition with SAM3
-# Docker image with CUDA support for GPU inference
+# GPU-accelerated inference with CUDA 12.1
 
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
 
-# Set environment variables
+# Environment
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Install system dependencies
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3-pip \
@@ -20,13 +20,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Create app directory
 WORKDIR /app
 
-# Copy requirements first for caching
+# Install PyTorch with CUDA support (cached layer)
 COPY requirements.txt .
-
-# Install PyTorch with CUDA support FIRST
 RUN pip3 install --no-cache-dir --upgrade pip && \
     pip3 install --no-cache-dir \
     torch torchvision --index-url https://download.pytorch.org/whl/cu121
@@ -34,19 +31,12 @@ RUN pip3 install --no-cache-dir --upgrade pip && \
 # Install remaining dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Copy project files
+# Copy application code
 COPY src/ ./src/
-COPY scripts/ ./scripts/
-COPY configs/ ./configs/
+COPY main.py .
 
-# Create data directories
-RUN mkdir -p data/input/raw data/output/visualizations data/output/masks models/huggingface
-
-# Set HuggingFace cache to local models directory
+# HuggingFace cache → local models volume
 ENV HF_HOME=/app/models/huggingface
 ENV TRANSFORMERS_CACHE=/app/models/huggingface
 
-# Default command
-# Default command
-ENTRYPOINT ["python3", "scripts/mosaic_inference.py"]
-CMD ["--help"]
+ENTRYPOINT ["python3", "main.py"]

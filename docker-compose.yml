@@ -2,7 +2,7 @@ services:
   sam3:
     build: .
     image: electrical-symbol-recognition:latest
-    
+
     # GPU support
     deploy:
       resources:
@@ -11,19 +11,16 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    
-    # Mount volumes for data and model cache
+
+    # Mount data (input + references + annotations) and output as volumes
     volumes:
       - ./data:/app/data
+      - ./output:/app/output
       - ./models:/app/models
-    
-    # Environment variables
+
+    # Environment
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
       - NVIDIA_VISIBLE_DEVICES=all
-    
-    # Working directory
+
     working_dir: /app
-    
-    # Default command (empty to use Dockerfile CMD)
-    # command: []
