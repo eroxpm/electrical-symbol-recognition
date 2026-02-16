@@ -50,9 +50,9 @@ HF_TOKEN: Optional[str] = os.environ.get("HF_TOKEN")
 
 # Per-class confidence overrides
 CONFIDENCE_THRESHOLDS: Dict[int, float] = {
-    0: 0.60,   # Resistor
-    1: 0.40,   # Capacitor
-    2: 0.40,   # Inductor
+    0: 0.30,   # Resistor
+    1: 0.30,   # Capacitor
+    2: 0.30,   # Inductor
     3: 0.15,   # FA DC
     4: 0.55,   # FA AC
 }
@@ -116,8 +116,19 @@ NMS_IOU_THRESHOLD = 0.5
 SIZE_FILTER_MULTIPLIER = 2.0  # Max detection size = 2x reference size
 
 # ============================================================
-# Visualization (BGR colors)
+# Visualization
 # ============================================================
+
+VISUALIZATION_THRESHOLDS: Dict[int, float] = {
+    0: 0.40,   # Resistor: 0.40
+    1: 0.40,   # Capacitor: 0.40
+    2: 0.45,   # Inductor: 0.45
+    3: 1.10,   # FA DC: Deactivated
+    4: 0.55,   # FA AC: Keep as is
+}
+
+# Explicitly disable some classes from visualization
+VISUALIZATION_DISABLED_CLASSES: list[int] = [3]  # FA DC
 
 CLASS_COLORS: Dict[int, tuple] = {
     0: (255, 0, 0),      # Resistor:  Blue

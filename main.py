@@ -24,6 +24,7 @@ from src.config import (
     OUTPUT_JSON_PATH,
     REFERENCE_FILENAMES,
 )
+from src.metrics import compute_metrics
 from src.utils import (
     load_coco_data,
     class_agnostic_nms,
@@ -63,6 +64,10 @@ def run_visualize_only() -> None:
         images_dir=INPUT_DIR,
         output_images_dir=OUTPUT_IMAGES_DIR,
     )
+
+    # ── Metrics ───────────────────────────────────────────────
+    print("\nComputing detection metrics...")
+    compute_metrics(ANNOTATIONS_PATH, OUTPUT_JSON_PATH)
 
     print(f"\n{'=' * 60}")
     print("  Visualize-only complete!")
@@ -159,6 +164,10 @@ def run_full_pipeline() -> None:
         output_images_dir=OUTPUT_IMAGES_DIR,
         apply_nms=False,  # Already NMS-filtered in Phase C
     )
+
+    # ── Phase F: Detection Metrics ────────────────────────────
+    print("\nComputing detection metrics...")
+    compute_metrics(ANNOTATIONS_PATH, OUTPUT_JSON_PATH)
 
     print(f"\n{'=' * 60}")
     print("  Pipeline complete!")

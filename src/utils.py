@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Any
 from datetime import datetime
 
-from src.config import CLASSES, CLASS_COLORS, NMS_IOU_THRESHOLD
+from src.config import (
+    CLASSES,
+    CLASS_COLORS,
+    NMS_IOU_THRESHOLD,
+    VISUALIZATION_THRESHOLDS,
+    VISUALIZATION_DISABLED_CLASSES,
+)
 
 
 # ============================================================
@@ -190,9 +196,21 @@ def visualize_coco_results(
     else:
         draw_anns = annotations
 
-    # Group filtered annotations by image_id
+    # Group filtered annotations by image_id and apply per-class thresholds
     anns_by_img: Dict[int, List[Dict]] = {}
     for ann in draw_anns:
+        cls_id = ann["category_id"]
+        score = ann["score"]
+
+        # Skip disabled classes
+        if cls_id in VISUALIZATION_DISABLED_CLASSES:
+            continue
+
+        # Skip if below per-class threshold
+        threshold = VISUALIZATION_THRESHOLDS.get(cls_id, 0.5)
+        if score < threshold:
+            continue
+
         anns_by_img.setdefault(ann["image_id"], []).append(ann)
 
     output_images_dir.mkdir(parents=True, exist_ok=True)
