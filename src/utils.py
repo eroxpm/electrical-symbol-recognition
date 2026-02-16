@@ -41,22 +41,25 @@ def load_coco_data(json_path: Path) -> Tuple[Dict, Dict, Dict, Dict]:
 
 
 # ============================================================
-# Global Class-Agnostic NMS
+# Global Class-Agnostic NMS (Coverage-Based)
 # ============================================================
 
 def class_agnostic_nms(
     annotations: List[Dict[str, Any]],
-    iou_threshold: float = NMS_IOU_THRESHOLD,
+    coverage_threshold: float = NMS_IOU_THRESHOLD,
 ) -> List[Dict[str, Any]]:
     """
-    Apply class-agnostic NMS across all annotations, grouped per image.
+    Apply class-agnostic NMS using **coverage** instead of IoU.
 
-    For overlapping detections (IoU > threshold), keep only the one with
-    the highest confidence score — regardless of class.
+    Coverage = intersection / min(area_a, area_b)
+
+    This catches nested boxes (a small detection inside a larger one)
+    that standard IoU misses. When coverage > threshold, the box with
+    the lower confidence score is suppressed — regardless of class.
 
     Args:
         annotations: list of annotation dicts with 'image_id', 'bbox' [x,y,w,h], 'score'.
-        iou_threshold: IoU threshold above which the lower-scored box is suppressed.
+        coverage_threshold: coverage ratio above which the lower-scored box is suppressed.
 
     Returns:
         Filtered list of annotation dicts.
@@ -93,7 +96,7 @@ def class_agnostic_nms(
                 box2 = [ox1, oy1, ox1 + ow, oy1 + oh]
                 area2 = ow * oh
 
-                # Compute IoU
+                # Compute intersection
                 ix1 = max(box1[0], box2[0])
                 iy1 = max(box1[1], box2[1])
                 ix2 = min(box1[2], box2[2])
@@ -101,12 +104,13 @@ def class_agnostic_nms(
 
                 iw = max(0, ix2 - ix1)
                 ih = max(0, iy2 - iy1)
-
                 inter = iw * ih
-                union = area1 + area2 - inter
-                iou = inter / union if union > 0 else 0
 
-                if iou < iou_threshold:
+                # Coverage: how much of the smaller box is covered
+                min_area = min(area1, area2)
+                coverage = inter / min_area if min_area > 0 else 0
+
+                if coverage < coverage_threshold:
                     remaining.append(other)
 
             anns = remaining
@@ -149,6 +153,71 @@ def draw_final_boxes(
                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
     return vis
+
+
+def visualize_coco_results(
+    results_json_path: Path,
+    images_dir: Path,
+    output_images_dir: Path,
+    apply_nms: bool = True,
+) -> None:
+    """
+    Load a COCO results JSON, optionally apply class-agnostic NMS,
+    and save annotated images.
+
+    The NMS filtering is applied only for drawing — the original JSON
+    is never modified.
+
+    Args:
+        results_json_path: path to results.json (COCO format).
+        images_dir: directory containing the source images.
+        output_images_dir: directory to write annotated images.
+    """
+    with open(results_json_path, "r") as f:
+        results = json.load(f)
+
+    annotations = results.get("annotations", [])
+    images_list = results.get("images", [])
+
+    if not annotations:
+        print("[WARN] No annotations found in results JSON.")
+        return
+
+    # Apply NMS for visualization (does not modify the saved JSON)
+    if apply_nms:
+        draw_anns = class_agnostic_nms(annotations)
+        print(f"  NMS for visualization: {len(annotations)} → {len(draw_anns)} boxes")
+    else:
+        draw_anns = annotations
+
+    # Group filtered annotations by image_id
+    anns_by_img: Dict[int, List[Dict]] = {}
+    for ann in draw_anns:
+        anns_by_img.setdefault(ann["image_id"], []).append(ann)
+
+    output_images_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+
+    for img_info in images_list:
+        img_id = img_info["id"]
+        filename = img_info["file_name"]
+        src_path = images_dir / filename
+
+        if not src_path.exists():
+            continue
+
+        img = cv2.imread(str(src_path))
+        if img is None:
+            continue
+
+        img_anns = anns_by_img.get(img_id, [])
+        vis = draw_final_boxes(img, img_anns)
+
+        out_path = output_images_dir / filename
+        cv2.imwrite(str(out_path), vis)
+        count += 1
+
+    print(f"  Saved {count} annotated images → {output_images_dir}")
 
 
 # ============================================================

@@ -2,14 +2,12 @@
 """
 Electrical Symbol Recognition – SAM3 Inference Pipeline.
 
-Single entry point that:
-  1. Loads COCO annotations.
-  2. Extracts reference crops and builds visual-prompt strips.
-  3. Iterates through each class sequentially, running SAM3 inference.
-  4. Applies Global Class-Agnostic NMS across all detections.
-  5. Saves results.json and annotated images to output/.
+Usage:
+    python main.py                  # Full pipeline (inference + NMS + visualisation)
+    python main.py --visualize_only # Re-draw images from existing results.json
 """
 
+import argparse
 import json
 import random
 import cv2
@@ -26,8 +24,12 @@ from src.config import (
     OUTPUT_JSON_PATH,
     REFERENCE_FILENAMES,
 )
-from src.detector import MatrixGenerator, run_inference_for_class
-from src.utils import load_coco_data, class_agnostic_nms, draw_final_boxes, build_coco_results
+from src.utils import (
+    load_coco_data,
+    class_agnostic_nms,
+    build_coco_results,
+    visualize_coco_results,
+)
 
 # Reproducibility
 random.seed(42)
@@ -44,7 +46,34 @@ def get_target_images(images_dir: Path) -> list[Path]:
     ]
 
 
-def main() -> None:
+def run_visualize_only() -> None:
+    """Re-generate annotated images from an existing results.json."""
+    print("=" * 60)
+    print("  Visualize-Only Mode")
+    print("=" * 60)
+
+    if not OUTPUT_JSON_PATH.exists():
+        print(f"[ERROR] Results file not found: {OUTPUT_JSON_PATH}")
+        print("  Run a full inference first, or check the path.")
+        return
+
+    print(f"\nLoading results from {OUTPUT_JSON_PATH}")
+    visualize_coco_results(
+        results_json_path=OUTPUT_JSON_PATH,
+        images_dir=INPUT_DIR,
+        output_images_dir=OUTPUT_IMAGES_DIR,
+    )
+
+    print(f"\n{'=' * 60}")
+    print("  Visualize-only complete!")
+    print(f"{'=' * 60}")
+
+
+def run_full_pipeline() -> None:
+    """Run the full SAM3 inference pipeline."""
+    # Lazy import — avoid loading heavy SAM3 deps in visualize-only mode
+    from src.detector import MatrixGenerator, run_inference_for_class
+
     print("=" * 60)
     print("  Electrical Symbol Recognition – SAM3 Pipeline")
     print("=" * 60)
@@ -77,7 +106,6 @@ def main() -> None:
             print(f"  [WARN] No reference crops for {cls_name}. Skipping.")
             continue
 
-        # Save strip for debugging / reproducibility
         strip_path = REFERENCES_DIR / f"reference_{cls_name}.jpg"
         strip_path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(strip_path), strip_img)
@@ -114,7 +142,6 @@ def main() -> None:
     print(f"  NMS: {len(all_raw_annotations)} → {len(final_annotations)} annotations")
 
     # ── Phase D: Save results ─────────────────────────────────
-    # Re-assign sequential IDs after NMS
     for idx, ann in enumerate(final_annotations, start=1):
         ann["id"] = idx
 
@@ -124,33 +151,35 @@ def main() -> None:
         json.dump(results, f, indent=4)
     print(f"\nSaved results → {OUTPUT_JSON_PATH}")
 
-    # ── Phase E: Visualisation ────────────────────────────────
+    # ── Phase E: Visualisation (reuse shared function) ────────
     print("Generating annotated images...")
+    visualize_coco_results(
+        results_json_path=OUTPUT_JSON_PATH,
+        images_dir=INPUT_DIR,
+        output_images_dir=OUTPUT_IMAGES_DIR,
+        apply_nms=False,  # Already NMS-filtered in Phase C
+    )
 
-    # Group annotations by image
-    anns_by_img: dict = {}
-    for ann in final_annotations:
-        anns_by_img.setdefault(ann["image_id"], []).append(ann)
-
-    for img_id, img_info in out_images_dict.items():
-        src_path = INPUT_DIR / img_info["file_name"]
-        if not src_path.exists():
-            continue
-
-        img = cv2.imread(str(src_path))
-        if img is None:
-            continue
-
-        img_anns = anns_by_img.get(img_id, [])
-        vis = draw_final_boxes(img, img_anns)
-
-        out_path = OUTPUT_IMAGES_DIR / img_info["file_name"]
-        cv2.imwrite(str(out_path), vis)
-
-    print(f"Saved annotated images → {OUTPUT_IMAGES_DIR}")
     print(f"\n{'=' * 60}")
     print("  Pipeline complete!")
     print(f"{'=' * 60}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Electrical Symbol Recognition with SAM3",
+    )
+    parser.add_argument(
+        "--visualize_only",
+        action="store_true",
+        help="Skip inference. Re-draw images from existing output/results.json.",
+    )
+    args = parser.parse_args()
+
+    if args.visualize_only:
+        run_visualize_only()
+    else:
+        run_full_pipeline()
 
 
 if __name__ == "__main__":
