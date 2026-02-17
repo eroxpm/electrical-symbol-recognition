@@ -24,3 +24,33 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
 
     working_dir: /app
+
+  # Gradio Web UI
+  ui:
+    build: .
+    image: electrical-symbol-recognition:latest
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./models:/app/models
+      - ./src:/app/src
+      - ./app.py:/app/app.py
+
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - NVIDIA_VISIBLE_DEVICES=all
+
+    ports:
+      - "7860:7860"
+
+    working_dir: /app
+    entrypoint: ["python3", "app.py"]

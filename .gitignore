@@ -220,7 +220,7 @@ models/checkpoints/*.bin
 models/checkpoints/*.safetensors
 
 # Data outputs (generated files)
-data/output/
+/output/
 
 # SAM3 library (should be cloned separately)
 libs/sam3/
@@ -228,3 +228,4 @@ libs/sam3/
 # Secrets / tokens
 .env.local
 *.token
+INTERVIEW_PREP.md

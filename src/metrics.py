@@ -83,27 +83,26 @@ def _match_boxes(
     return matched_pairs
 
 
-def compute_metrics(
+def _build_classification_data(
     gt_json_path: Path,
     results_json_path: Path,
     iou_threshold: float = 0.4,
-) -> Dict[str, Any]:
+) -> Tuple[List[str], List[str], List[str]]:
     """
-    Compute detection metrics and save reports to output/.
+    Match GT vs Predictions and build y_true/y_pred alignment lists.
+
+    Returns:
+        (y_true, y_pred, labels) where labels excludes 'Background'.
     """
-    output_dir = results_json_path.parent
-    
     with open(gt_json_path, "r") as f:
         gt_data = json.load(f)
     with open(results_json_path, "r") as f:
         pred_data = json.load(f)
 
-    # Map filename -> image_id
     gt_file_to_id = {img["file_name"]: img["id"] for img in gt_data["images"]}
     pred_file_to_id = {img["file_name"]: img["id"] for img in pred_data["images"]}
     common_files = set(gt_file_to_id) & set(pred_file_to_id)
 
-    # Group annotations by image
     gt_by_img: Dict[int, List[Dict]] = {}
     for ann in gt_data["annotations"]:
         img_id = ann["image_id"]
@@ -119,102 +118,147 @@ def compute_metrics(
     for ann in filtered_preds:
         pred_by_img.setdefault(ann["image_id"], []).append(ann)
 
-    # Alignment lists
-    y_true = []
-    y_pred = []
-    all_ious = []
+    y_true: List[str] = []
+    y_pred: List[str] = []
 
-    # Process images
     all_img_ids = set(gt_by_img.keys()) | set(pred_by_img.keys())
-
     for img_id in all_img_ids:
         gts = gt_by_img.get(img_id, [])
         preds = pred_by_img.get(img_id, [])
 
-        if gts:
-            g_boxes = torch.tensor([
-                [a["bbox"][0], a["bbox"][1], a["bbox"][0] + a["bbox"][2], a["bbox"][1] + a["bbox"][3]]
+        g_boxes = (
+            torch.tensor([
+                [a["bbox"][0], a["bbox"][1],
+                 a["bbox"][0] + a["bbox"][2], a["bbox"][1] + a["bbox"][3]]
                 for a in gts
-            ], dtype=torch.float32)
-        else:
-            g_boxes = torch.empty((0, 4), dtype=torch.float32)
-
-        if preds:
-            p_boxes = torch.tensor([
-                [a["bbox"][0], a["bbox"][1], a["bbox"][0] + a["bbox"][2], a["bbox"][1] + a["bbox"][3]]
+            ], dtype=torch.float32) if gts
+            else torch.empty((0, 4), dtype=torch.float32)
+        )
+        p_boxes = (
+            torch.tensor([
+                [a["bbox"][0], a["bbox"][1],
+                 a["bbox"][0] + a["bbox"][2], a["bbox"][1] + a["bbox"][3]]
                 for a in preds
-            ], dtype=torch.float32)
-        else:
-            p_boxes = torch.empty((0, 4), dtype=torch.float32)
+            ], dtype=torch.float32) if preds
+            else torch.empty((0, 4), dtype=torch.float32)
+        )
 
         matched_pairs = _match_boxes(g_boxes, p_boxes, iou_threshold)
-        
-        used_g = set()
-        used_p = set()
-        
-        # 1. Matched pairs
-        for gi, pi, iou in matched_pairs:
+        used_g: Set[int] = set()
+        used_p: Set[int] = set()
+
+        for gi, pi, _ in matched_pairs:
             used_g.add(gi)
             used_p.add(pi)
-            all_ious.append(iou)
-            
-            gt_cls = CLASSES.get(gts[gi]["category_id"], str(gts[gi]["category_id"]))
-            pred_cls = CLASSES.get(preds[pi]["category_id"], str(preds[pi]["category_id"]))
-            
-            y_true.append(gt_cls)
-            y_pred.append(pred_cls)
+            y_true.append(CLASSES.get(gts[gi]["category_id"], str(gts[gi]["category_id"])))
+            y_pred.append(CLASSES.get(preds[pi]["category_id"], str(preds[pi]["category_id"])))
 
-        # 2. Unmatched GT (False Negatives)
         for i, ann in enumerate(gts):
             if i not in used_g:
-                cls_name = CLASSES.get(ann["category_id"], str(ann["category_id"]))
-                y_true.append(cls_name)
+                y_true.append(CLASSES.get(ann["category_id"], str(ann["category_id"])))
                 y_pred.append("Background")
 
-        # 3. Unmatched Preds (False Positives)
         for i, ann in enumerate(preds):
             if i not in used_p:
-                cls_name = CLASSES.get(ann["category_id"], str(ann["category_id"]))
                 y_true.append("Background")
-                y_pred.append(cls_name)
+                y_pred.append(CLASSES.get(ann["category_id"], str(ann["category_id"])))
 
-    # --------------------------------------------------------
-    # Reports
-    # --------------------------------------------------------
-    labels = sorted([c for c in list(set(y_true) | set(y_pred)) if c != "Background"])
+    labels = sorted([c for c in set(y_true) | set(y_pred) if c != "Background"])
+    return y_true, y_pred, labels
+
+
+def compute_metrics(
+    gt_json_path: Path,
+    results_json_path: Path,
+    iou_threshold: float = 0.4,
+) -> Dict[str, Any]:
+    """Compute metrics and save CSV + PNG to disk (for CLI)."""
+    output_dir = results_json_path.parent
+
+    y_true, y_pred, labels = _build_classification_data(
+        gt_json_path, results_json_path, iou_threshold,
+    )
     cm_labels = labels + ["Background"]
-    
+
     print(f"\n{'=' * 80}")
     print(f"  Generating Metrics Reports (IoU > {iou_threshold})")
     print(f"{'=' * 80}")
 
-    # 1. Metrics CSV
     report_dict = classification_report(
-        y_true, 
-        y_pred, 
-        labels=labels, 
-        output_dict=True,
-        zero_division=0.0
+        y_true, y_pred, labels=labels,
+        output_dict=True, zero_division=0.0,
     )
-    df_metrics = pd.DataFrame(report_dict).transpose()
+    df = pd.DataFrame(report_dict).transpose()
     csv_path = output_dir / "metrics.csv"
-    df_metrics.to_csv(csv_path)
+    df.to_csv(csv_path)
     print(f"Saved metrics CSV -> {csv_path}")
 
-    # 2. Confusion Matrix PNG
     cm = confusion_matrix(y_true, y_pred, labels=cm_labels)
-    
     fig, ax = plt.subplots(figsize=(10, 8))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=cm_labels)
     disp.plot(cmap="Blues", ax=ax, values_format="d")
     plt.title(f"Confusion Matrix (IoU > {iou_threshold})")
     plt.tight_layout()
-    
     cm_path = output_dir / "confusion_matrix.png"
     plt.savefig(cm_path)
     plt.close()
     print(f"Saved confusion matrix -> {cm_path}")
-    
     print(f"{'=' * 80}\n")
-    
+
     return {}
+
+
+def compute_metrics_for_ui(
+    gt_json_path: Path,
+    results_json_path: Path,
+    iou_threshold: float = 0.4,
+) -> Tuple["pd.DataFrame", "plt.Figure"]:
+    """
+    Compute metrics and return Gradio-compatible objects.
+
+    Returns:
+        (metrics_dataframe, confusion_matrix_figure)
+        - DataFrame: rows = classes, cols = precision/recall/f1/support
+        - Figure: matplotlib confusion matrix figure for gr.Plot
+    """
+    y_true, y_pred, labels = _build_classification_data(
+        gt_json_path, results_json_path, iou_threshold,
+    )
+    cm_labels = labels + ["Background"]
+
+    # Metrics DataFrame
+    report_dict = classification_report(
+        y_true, y_pred, labels=labels,
+        output_dict=True, zero_division=0.0,
+    )
+    df = pd.DataFrame(report_dict).transpose()
+
+    # Round for readability
+    for col in ["precision", "recall", "f1-score"]:
+        if col in df.columns:
+            df[col] = df[col].round(2)
+    if "support" in df.columns:
+        df["support"] = df["support"].astype(int)
+
+    # Reset index so class names become a column (cleaner for gr.Dataframe)
+    df = df.reset_index().rename(columns={"index": "Class"})
+
+    # Also save to disk
+    output_dir = results_json_path.parent
+    df.to_csv(output_dir / "metrics.csv")
+
+    # Confusion Matrix Figure
+    cm = confusion_matrix(y_true, y_pred, labels=cm_labels)
+    fig, ax = plt.subplots(figsize=(5, 4))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=cm_labels)
+    disp.plot(cmap="Blues", ax=ax, values_format="d")
+    ax.set_title(f"Confusion Matrix (IoU > {iou_threshold})", fontsize=10)
+    plt.xticks(fontsize=8)
+    plt.yticks(fontsize=8)
+    fig.tight_layout(pad=0.5)
+
+    # Also save to disk
+    fig.savefig(output_dir / "confusion_matrix.png")
+
+    return df, fig
+

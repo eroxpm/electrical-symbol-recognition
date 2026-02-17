@@ -34,6 +34,7 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY src/ ./src/
 COPY main.py .
+COPY app.py .
 
 # HuggingFace cache → local models volume
 ENV HF_HOME=/app/models/huggingface

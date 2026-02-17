@@ -409,200 +409,150 @@ class MatrixGenerator:
 
 
 # ============================================================
-# Per-Class Inference
+# Per-Image All-Classes Inference
 # ============================================================
 
-def run_inference_for_class(
-    target_cls: int,
-    strip_img: np.ndarray,
-    strip_info: List[Dict],
-    target_paths: List[Path],
-    filename_to_id: Dict[str, int],
-    out_images_dict: Dict[int, Dict],
+
+def infer_image_all_classes(
+    target_path: Path,
+    img_id: int,
+    precomputed_strips: Dict[int, Tuple[np.ndarray, List[Dict]]],
+    sam_model: "SAM3Model",
     start_ann_id: int = 1,
-) -> Tuple[List[Dict], int]:
+    log=None,
+) -> Tuple[List[Dict], Dict, int]:
     """
-    Run SAM3 inference for a single class across all target images.
+    Run SAM3 inference on ONE image for ALL classes.
+
+    Loads the image once, then iterates over each class strip.
+    The SAM3 model must already be initialized.
 
     Args:
-        target_cls: class ID to detect.
-        strip_img: pre-computed reference strip image.
-        strip_info: cell metadata for the strip.
-        target_paths: list of target image paths.
-        filename_to_id: COCO filename → image_id lookup.
-        out_images_dict: shared dict of output image metadata (mutated in-place).
+        target_path: path to the target image.
+        img_id: COCO image ID.
+        precomputed_strips: {cls_id: (strip_img, strip_info)}.
+        sam_model: pre-initialized SAM3Model instance.
         start_ann_id: starting annotation ID counter.
+        log: optional logging callback.
 
     Returns:
-        (raw_annotations, next_ann_id)
+        (annotations, image_meta, next_ann_id)
     """
-    cls_name = CLASSES.get(target_cls, f"class_{target_cls}")
-    conf = CONFIDENCE_THRESHOLDS.get(target_cls, DEFAULT_CONFIDENCE)
-    print(f"\n=== Processing Class: {cls_name} ({target_cls}) | Conf: {conf} ===")
+    _log = log or (lambda msg: print(msg))
+    target_img = cv2.imread(str(target_path))
+    if target_img is None:
+        return [], {}, start_ann_id
 
-    sam_model = SAM3Model(
-        model_id=MODEL_ID,
-        confidence_threshold=conf,
-        mask_threshold=MASK_THRESHOLD,
-        device=DEVICE,
-        hf_token=HF_TOKEN,
-    )
-    sam_model.initialize()
+    t_h, t_w = target_img.shape[:2]
+    image_meta = {
+        "id": img_id,
+        "file_name": target_path.name,
+        "height": t_h,
+        "width": t_w,
+    }
 
-    raw_annotations: List[Dict] = []
+    annotations: List[Dict] = []
     ann_id = start_ann_id
 
-    try:
-        for target_path in target_paths:
-            target_filename = target_path.name
-            img_id = filename_to_id.get(target_filename, 0)
+    for cls_id, (strip_img, strip_info) in precomputed_strips.items():
+        cls_name = CLASSES.get(cls_id, str(cls_id))
+        conf = CONFIDENCE_THRESHOLDS.get(cls_id, DEFAULT_CONFIDENCE)
+        sam_model.confidence_threshold = conf
+        ann_id_before = ann_id
 
-            target_img = cv2.imread(str(target_path))
-            if target_img is None:
-                print(f"  Failed to read image {target_path}")
-                continue
+        # Scale strip to match target height
+        m_h_base, m_w_base = strip_img.shape[:2]
+        target_strip_h = min(int(t_h * 1.0), t_h)
+        scale = target_strip_h / m_h_base
+        new_m_w = int(m_w_base * scale)
 
-            t_h, t_w = target_img.shape[:2]
+        matrix_content = cv2.resize(
+            strip_img, (new_m_w, target_strip_h),
+            interpolation=cv2.INTER_LINEAR,
+        )
 
-            # Register image metadata (deduplicated)
-            if img_id not in out_images_dict:
-                out_images_dict[img_id] = {
-                    "id": img_id,
-                    "file_name": target_filename,
-                    "height": t_h,
-                    "width": t_w,
-                }
+        # Pad to full target height (center vertically)
+        matrix_scaled = np.ones((t_h, new_m_w, 3), dtype=np.uint8) * 255
+        y_offset = (t_h - target_strip_h) // 2
+        matrix_scaled[y_offset:y_offset + target_strip_h, :] = matrix_content
 
-            # Scale the reference strip to match target height
-            m_h_base, m_w_base = strip_img.shape[:2]
-            target_strip_h = int(t_h * 1.0)  # 1:1 ratio
+        # Scale cell metadata
+        scaled_info = []
+        for cell in strip_info:
+            x1, y1, x2, y2 = cell["box"]
+            nx1 = max(0, int(x1 * scale))
+            ny1 = max(0, int(y1 * scale) + y_offset)
+            nx2 = min(new_m_w, int(x2 * scale))
+            ny2 = min(target_strip_h + y_offset, int(y2 * scale) + y_offset)
+            scaled_info.append({"class_id": cell["class_id"], "box": [nx1, ny1, nx2, ny2]})
 
-            if target_strip_h > t_h:
-                target_strip_h = t_h
+        # Build canvas: [reference strip | target image]
+        canvas = np.zeros((t_h, new_m_w + t_w, 3), dtype=np.uint8)
+        canvas[:, :new_m_w, :] = matrix_scaled
+        canvas[:, new_m_w:, :] = target_img
+        canvas_pil = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
 
-            scale = target_strip_h / m_h_base
-            new_m_w = int(m_w_base * scale)
-            new_m_h_content = target_strip_h
+        # Prepare prompts
+        active_prompts = [cell["box"] for cell in scaled_info]
+        if not active_prompts:
+            continue
 
-            matrix_content = cv2.resize(
-                strip_img, (new_m_w, new_m_h_content), interpolation=cv2.INTER_LINEAR
+        active_labels = [1] * len(active_prompts)
+        last = active_prompts[-1]
+        prompt_ref_size = (last[2] - last[0], last[3] - last[1])
+
+        # Inference
+        try:
+            res = sam_model.predict_with_boxes(
+                image=canvas_pil,
+                boxes_xyxy=active_prompts,
+                labels=active_labels,
             )
+        except Exception as e:
+            _log(f"    ⚠️ Inference failed for {cls_name}: {e}")
+            continue
 
-            # Pad to full target height (center vertically)
-            matrix_scaled = np.ones((t_h, new_m_w, 3), dtype=np.uint8) * 255
-            y_offset = (t_h - new_m_h_content) // 2
-            matrix_scaled[y_offset:y_offset + new_m_h_content, :] = matrix_content
+        d_boxes = res.get("boxes", [])
+        scores = res.get("scores", [])
 
-            # Scale cell metadata
-            scaled_info = []
-            for cell in strip_info:
-                x1, y1, x2, y2 = cell["box"]
-                nx1 = int(x1 * scale)
-                ny1 = int(y1 * scale) + y_offset
-                nx2 = int(x2 * scale)
-                ny2 = int(y2 * scale) + y_offset
+        if torch.is_tensor(scores):
+            scores = scores.tolist() if scores.numel() > 0 else []
+        if not scores:
+            scores = [1.0] * len(d_boxes)
 
-                # Clamp
-                nx1 = max(0, nx1)
-                ny1 = max(0, ny1)
-                nx2 = min(new_m_w, nx2)
-                ny2 = min(target_strip_h + y_offset, ny2)
+        # Filter detections
+        for i, box in enumerate(d_boxes):
+            x1, y1, x2, y2 = box
+            cx = (x1 + x2) / 2
+            if cx > new_m_w:
+                nx1 = max(0, x1 - new_m_w)
+                nx2 = max(0, x2 - new_m_w)
+                ny1 = max(0, y1)
+                ny2 = max(0, y2)
+                nw = nx2 - nx1
+                nh = ny2 - ny1
 
-                scaled_info.append({
-                    "class_id": cell["class_id"],
-                    "box": [nx1, ny1, nx2, ny2],
+                ref_w, ref_h = prompt_ref_size
+                if nw > ref_w * SIZE_FILTER_MULTIPLIER or nh > ref_h * SIZE_FILTER_MULTIPLIER:
+                    continue
+
+                annotations.append({
+                    "id": ann_id,
+                    "image_id": img_id,
+                    "category_id": cls_id,
+                    "bbox": [float(nx1), float(ny1), float(nw), float(nh)],
+                    "area": float(nw * nh),
+                    "iscrowd": 0,
+                    "score": float(scores[i]),
                 })
+                ann_id += 1
 
-            # Build canvas: [reference strip | target image]
-            canvas = np.zeros((t_h, new_m_w + t_w, 3), dtype=np.uint8)
-            canvas[:, :new_m_w, :] = matrix_scaled
-            canvas[:, new_m_w:, :] = target_img
-            canvas_pil = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+        cls_det = ann_id - ann_id_before
+        if cls_det > 0:
+            _log(f"    {cls_name}: {cls_det} det.")
 
-            # Prepare prompts
-            active_prompts = [cell["box"] for cell in scaled_info]
-            active_labels = [1] * len(active_prompts)
+        del canvas, canvas_pil
 
-            # Track reference size for size filtering
-            prompt_ref_size = (0, 0)
-            if active_prompts:
-                last = active_prompts[-1]
-                prompt_ref_size = (last[2] - last[0], last[3] - last[1])
+    del target_img
+    return annotations, image_meta, ann_id
 
-            if not active_prompts:
-                del target_img, canvas, canvas_pil
-                continue
-
-            # Inference
-            try:
-                res = sam_model.predict_with_boxes(
-                    image=canvas_pil,
-                    boxes_xyxy=active_prompts,
-                    labels=active_labels,
-                )
-            except Exception as e:
-                print(f"  Model Inference Failed for {target_filename}: {e}")
-                continue
-
-            d_boxes = res.get("boxes", [])
-            scores = res.get("scores", [])
-
-            if torch.is_tensor(scores):
-                scores = scores.tolist() if scores.numel() > 0 else []
-            if not scores:
-                scores = [1.0] * len(d_boxes)
-
-            # Process detections
-            valid_count = 0
-            for i, box in enumerate(d_boxes):
-                x1, y1, x2, y2 = box
-                score = scores[i]
-                cx = (x1 + x2) / 2
-
-                # Only keep detections on the right side (target image area)
-                if cx > new_m_w:
-                    nx1 = max(0, x1 - new_m_w)
-                    nx2 = max(0, x2 - new_m_w)
-                    ny1 = max(0, y1)
-                    ny2 = max(0, y2)
-
-                    nw = nx2 - nx1
-                    nh = ny2 - ny1
-
-                    # Size filtering (2x reference size)
-                    ref_w, ref_h = prompt_ref_size
-                    max_w = ref_w * SIZE_FILTER_MULTIPLIER
-                    max_h = ref_h * SIZE_FILTER_MULTIPLIER
-
-                    if nw > max_w or nh > max_h:
-                        continue
-
-                    raw_annotations.append({
-                        "id": ann_id,
-                        "image_id": img_id,
-                        "category_id": target_cls,
-                        "bbox": [float(nx1), float(ny1), float(nw), float(nh)],
-                        "area": float(nw * nh),
-                        "iscrowd": 0,
-                        "score": float(score),
-                    })
-                    ann_id += 1
-                    valid_count += 1
-
-            if valid_count > 0:
-                print(f"    {target_filename}: {valid_count} detections.")
-
-            del target_img, canvas, canvas_pil, res, d_boxes, scores
-
-    except Exception as e:
-        print(f"Error processing class {cls_name}: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        print(f"Cleaning up model for {cls_name}...")
-        del sam_model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    return raw_annotations, ann_id

@@ -1,194 +1,107 @@
-# Electrical Symbol Recognition with SAM3
+# Electrical Symbol Recognition — SAM3
 
-A Python project for electrical symbol recognition using Meta's SAM3 (Segment Anything Model 3) via HuggingFace Transformers.
+Detection of electrical symbols (resistors, capacitors, inductors, etc.) in schematic images using **Meta's SAM3** (Segment Anything Model 3) with visual prompting.
 
-## Features
+## How It Works
 
-- **Text-based segmentation**: Describe objects using natural language
-- **Box prompts**: Use bounding boxes to guide segmentation
-- **Batch processing**: Process multiple images efficiently
-- **Popup visualization**: View results interactively
+1. **Reference crops** are extracted from COCO-annotated schematics
+2. A **visual-prompt strip** is built per class (multi-scale reference matrix)
+3. SAM3 runs inference on `[reference strip | target image]` canvases
+4. **Class-agnostic NMS** (coverage-based) filters overlapping detections
+5. Results are saved as COCO JSON + annotated images + metrics
 
-## Installation
+## Quick Start (Docker)
 
 ### Prerequisites
-- Python 3.10+
-- CUDA-compatible GPU (recommended)
-- HuggingFace account with access to [facebook/sam3](https://huggingface.co/facebook/sam3)
+- Docker with **NVIDIA GPU support** (`nvidia-container-toolkit`)
+- HuggingFace token with access to `facebook/sam3`
 
 ### Setup
-
-1. Create a conda environment:
 ```bash
-conda create -n sam3-env python=3.10
-conda activate sam3-env
+echo "HF_TOKEN=hf_your_token_here" > .env
+docker-compose build sam3
 ```
 
-2. Install PyTorch with CUDA:
+### Execution Modes
+
+#### 1. CLI — Full Pipeline
+Runs inference → NMS → annotated images → metrics:
 ```bash
-conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
+docker-compose run --rm sam3
 ```
 
-3. Install dependencies:
+#### 2. CLI — Visualize Only
+Regenerates annotated images + metrics from existing `output/results.json`:
 ```bash
-pip install -r requirements.txt
+docker-compose run --rm sam3 --visualize_only
 ```
 
-4. Login to HuggingFace:
+#### 3. Gradio Web UI
+Interactive two-tab dashboard:
 ```bash
-huggingface-cli login
+docker-compose up ui
+# Open http://localhost:7860
 ```
 
-## Usage
+**Tab 1 — Single Image Debug:**
+- Select one image, run detection, see annotated result + raw JSON + debug log
 
-### Command Line
+**Tab 2 — Batch Analysis & Metrics:**
+- Run full pipeline or load existing results
+- View per-class Precision/Recall/F1 table + Confusion Matrix
+- Browse all annotated output images + reference mosaics
 
-```bash
-# Basic prediction with popup display
-python scripts/predict.py --image path/to/image.jpg --prompt "object" --show
+## Output Files
 
-# Save visualization (no popup)
-python scripts/predict.py --image path/to/image.jpg --prompt "resistor" --threshold 0.5
-
-# Save individual masks
-python scripts/predict.py --image path/to/image.jpg --prompt "capacitor" --save-masks
-```
-
-### Python API
-
-```python
-from src.inference.predictor import SymbolPredictor
-
-# Initialize predictor
-predictor = SymbolPredictor()
-
-# Process an image
-results = predictor.process_image(
-    image_path="path/to/image.jpg",
-    text_prompt="resistor",
-    show_popup=True
-)
-
-print(f"Found {len(results['masks'])} objects")
-```
-
-### Low-level API
-
-```python
-from src.model.sam3_wrapper import SAM3Model
-from PIL import Image
-
-# Initialize model
-model = SAM3Model(confidence_threshold=0.5)
-
-# Load and process image
-image = Image.open("path/to/image.jpg")
-results = model.predict_with_text(image, "electrical component")
-
-# Results contain: masks, boxes, scores
-```
+| File | Description |
+|------|-------------|
+| `output/results.json` | COCO-format detection results |
+| `output/images/*.jpg` | Annotated schematic images |
+| `output/metrics.csv` | Per-class Precision, Recall, F1 |
+| `output/confusion_matrix.png` | Visual confusion matrix |
 
 ## Project Structure
 
 ```
-electrical-symbol-recognition/
-├── configs/
-│   └── config.yaml        # Configuration file
-├── data/
-│   ├── input/             # Input images
-│   └── output/            # Generated outputs
-├── models/
-│   └── huggingface/       # Cached HuggingFace models
-├── scripts/
-│   └── predict.py         # CLI prediction script
+├── app.py                      # Gradio Web UI (two-tab dashboard)
+├── main.py                     # CLI entry point
 ├── src/
-│   ├── config.py          # Configuration management
-│   ├── model/
-│   │   └── sam3_wrapper.py    # SAM3 model wrapper
-│   ├── inference/
-│   │   └── predictor.py       # High-level predictor
-│   └── utils/
-│       └── visualization.py   # Visualization utilities
-├── tests/
-│   └── test_basic.py      # Basic tests
-├── requirements.txt
-└── README.md
+│   ├── config.py               # Paths, thresholds, class definitions
+│   ├── detector.py             # SAM3 model wrapper + inference logic
+│   ├── inference_engine.py     # Reusable engine (shared by CLI + UI)
+│   ├── metrics.py              # Detection metrics (sklearn + pandas)
+│   └── utils.py                # NMS, visualization, COCO helpers
+├── data/
+│   ├── input/                  # Target schematic images
+│   ├── references/             # Generated reference strips
+│   └── annotations.json        # COCO ground truth
+├── models/                     # Cached HuggingFace models
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
 ```
 
 ## Configuration
 
-Edit `configs/config.yaml`:
+All tuning parameters are in [`src/config.py`](src/config.py):
 
-```yaml
-model_id: facebook/sam3
-confidence_threshold: 0.5
-mask_threshold: 0.5
-device: cuda
-```
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `CONFIDENCE_THRESHOLDS` | Per-class detection confidence | 0.15–0.55 |
+| `VISUALIZATION_THRESHOLDS` | Per-class drawing threshold | 0.40–0.55 |
+| `NMS_IOU_THRESHOLD` | Coverage threshold for NMS | 0.5 |
+| `SIZE_FILTER_MULTIPLIER` | Max detection = N × reference size | 2.0 |
+| `VISUALIZATION_DISABLED_CLASSES` | Classes hidden from output | `[3]` (FA DC) |
 
-Or use environment variables:
-```bash
-export HF_TOKEN="your_huggingface_token"
-```
+## Detected Classes
 
-## CLI Options
-
-| Option | Description |
-|--------|-------------|
-| `--image`, `-i` | Path to input image (required) |
-| `--prompt`, `-p` | Text prompt for detection (required) |
-| `--threshold`, `-t` | Confidence threshold (default: 0.5) |
-| `--show` | Show results in popup window |
-| `--save-masks` | Save individual mask files |
-| `--no-save` | Don't save visualization |
-| `--output-dir`, `-o` | Custom output directory |
-
-## Docker
-
-Run without installing anything (requires NVIDIA Docker):
-
-### Setup
-
-Create a `.env` file with your HuggingFace token:
-
-```bash
-echo "HF_TOKEN=hf_your_token_here" > .env
-```
-
-### Build
-
-```bash
-docker-compose build
-```
-
-### Run with GPU
-
-```bash
-# Basic usage
-docker run --gpus all -v $(pwd)/data:/app/data -v $(pwd)/models:/app/models \
-  electrical-symbol-recognition \
-  --image data/input/raw/image.jpg --prompt "resistor"
-
-# With HuggingFace token
-docker run --gpus all \
-  -e HF_TOKEN="your_token" \
-  -v $(pwd)/data:/app/data \
-  -v $(pwd)/models:/app/models \
-  electrical-symbol-recognition \
-  --image data/input/raw/image.jpg --prompt "capacitor"
-```
-
-### Using Docker Compose
-
-```bash
-# Build
-docker-compose build
-
-# Run prediction (cleans up after execution)
-docker-compose run --rm sam3 --image data/input/raw/image.jpg --prompt "resistor"
-```
-
-> **Note**: The model (~3.4GB) downloads on first run. Mount `./models` to cache it.
+| ID | Class | Color | Status |
+|----|-------|-------|--------|
+| 0 | Resistor | Blue | Active |
+| 1 | Capacitor | Green | Active |
+| 2 | Inductor | Red | Active |
+| 3 | FA DC | Cyan | Disabled |
+| 4 | FA AC | Yellow | Active |
 
 ## License
 
