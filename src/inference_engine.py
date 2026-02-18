@@ -47,6 +47,7 @@ class InferenceEngine:
     """
 
     def __init__(self):
+        # El modelo y los strips se inicializan solo cuando se necesitan por primera vez
         self._model = None
         self._strips: Dict[int, Tuple[np.ndarray, list]] = {}
         self._coco_data = None
@@ -60,13 +61,14 @@ class InferenceEngine:
     def _ensure_loaded(self, log: Optional[Callable] = None):
         """Load model + precompute strips on first call."""
         if self._ready:
-            return
+            return  # Ya inicializado, no hace nada
 
         _log = log or (lambda msg: print(msg))
 
+        # Importación tardía para evitar cargar torch al importar el módulo
         from src.detector import MatrixGenerator, SAM3Model
 
-        # COCO annotations
+        # Carga las anotaciones COCO y construye los índices de lookup
         _log("Loading annotations...")
         coco_data, coco_images, coco_anns, filename_to_id = load_coco_data(
             ANNOTATIONS_PATH,
@@ -74,7 +76,7 @@ class InferenceEngine:
         self._coco_data = coco_data
         self._filename_to_id = filename_to_id
 
-        # Reference strips
+        # Genera un strip de referencia visual por cada clase
         _log("Building reference strips...")
         gen = MatrixGenerator(INPUT_DIR, coco_anns, coco_images, filename_to_id)
         gen.extract_best_crops()
@@ -82,6 +84,7 @@ class InferenceEngine:
         for cls_id, cls_name in CLASSES.items():
             strip_img, strip_info = gen.generate_matrix(target_cls=cls_id)
             if strip_info:
+                # Guarda el strip en disco para poder inspeccionarlo visualmente
                 strip_path = REFERENCES_DIR / f"reference_{cls_name}.jpg"
                 strip_path.parent.mkdir(parents=True, exist_ok=True)
                 cv2.imwrite(str(strip_path), strip_img)
@@ -90,7 +93,7 @@ class InferenceEngine:
             else:
                 _log(f"  ⚠️ No crops for {cls_name}")
 
-        # SAM3 model
+        # Carga el modelo SAM3 (descarga de HuggingFace si no está en caché)
         _log("Loading SAM3 model...")
         self._model = SAM3Model(
             model_id=MODEL_ID,
@@ -124,6 +127,7 @@ class InferenceEngine:
         def dlog(msg: str):
             debug_lines.append(msg)
 
+        # Inicializa modelo y strips si aún no se ha hecho
         self._ensure_loaded(log=dlog)
 
         from src.detector import infer_image_all_classes
@@ -131,6 +135,7 @@ class InferenceEngine:
         img_id = self._filename_to_id.get(image_path.name, 0)
         dlog(f"Image: {image_path.name} (id={img_id})")
 
+        # Inferencia raw: todas las clases, sin NMS ni filtros de visualización
         raw_anns, _, _ = infer_image_all_classes(
             target_path=image_path,
             img_id=img_id,
@@ -139,7 +144,7 @@ class InferenceEngine:
         )
         dlog(f"Raw detections: {len(raw_anns)}")
 
-        # Per-class breakdown
+        # Log de detecciones por clase para debug
         by_class: Dict[str, int] = {}
         for ann in raw_anns:
             cls_name = CLASSES.get(ann["category_id"], "?")
@@ -147,7 +152,7 @@ class InferenceEngine:
         for cls, cnt in sorted(by_class.items()):
             dlog(f"  {cls}: {cnt}")
 
-        # NMS
+        # NMS: elimina boxes solapados, conserva el de mayor score
         if raw_anns:
             final_anns = class_agnostic_nms(raw_anns)
             removed = len(raw_anns) - len(final_anns)
@@ -156,7 +161,7 @@ class InferenceEngine:
             final_anns = []
             dlog("No detections to filter")
 
-        # Apply per-class visualization thresholds (same as batch pipeline)
+        # Aplica umbrales de visualización por clase (igual que en el pipeline batch)
         filtered_anns = []
         for ann in final_anns:
             cls_id = ann["category_id"]
@@ -172,15 +177,16 @@ class InferenceEngine:
             dlog(f"Visualization filter removed {vis_removed} → {len(filtered_anns)} shown")
         final_anns = filtered_anns
 
-        # Draw
+        # Dibuja los boxes sobre la imagen original
         img = cv2.imread(str(image_path))
         if img is not None and final_anns:
             img = draw_final_boxes(img, final_anns)
+        # Convierte BGR → RGB para Gradio / PIL
         annotated_rgb = (
             cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else None
         )
 
-        # JSON-friendly detection list
+        # Construye la lista de detecciones en formato limpio para la UI
         detections = []
         for ann in final_anns:
             cls_id = ann["category_id"]
@@ -213,7 +219,7 @@ class InferenceEngine:
         """
         _log = log or (lambda msg: print(msg))
         self._ensure_loaded(log=_log)
-        yield  # after model load
+        yield  # Punto de yield tras cargar el modelo (permite actualizar la UI)
 
         from src.detector import infer_image_all_classes
 
@@ -222,12 +228,13 @@ class InferenceEngine:
 
         targets = self._get_target_images()
         _log(f"\n🚀 Running inference on {len(targets)} images...")
-        yield  # after setup
+        yield  # Punto de yield tras preparar la lista de imágenes
 
         out_images_dict: Dict[int, Dict] = {}
         all_annotations: List[Dict] = []
         ann_id = 1
 
+        # Procesa cada imagen y acumula sus detecciones
         for idx, target_path in enumerate(targets, start=1):
             img_id = self._filename_to_id.get(target_path.name, 0)
 
@@ -248,23 +255,24 @@ class InferenceEngine:
                 f"  📸 [{idx}/{len(targets)}] {target_path.name}: "
                 f"{len(image_anns)} detections"
             )
-            yield  # after each image
+            yield  # Punto de yield tras cada imagen (streaming en la UI)
 
-        # NMS
+        # NMS global sobre todas las imágenes juntas
         raw_count = len(all_annotations)
         final_annotations = class_agnostic_nms(all_annotations)
+        # Reasigna IDs consecutivos tras el filtrado
         for i, ann in enumerate(final_annotations, start=1):
             ann["id"] = i
         _log(f"\n🧹 NMS: {raw_count} → {len(final_annotations)}")
-        yield  # after NMS
+        yield  # Punto de yield tras NMS
 
-        # Save JSON
+        # Serializa los resultados en formato COCO
         results = build_coco_results(out_images_dict, final_annotations)
         with open(OUTPUT_JSON_PATH, "w") as f:
             json.dump(results, f, indent=4)
         _log(f"💾 Saved → {OUTPUT_JSON_PATH}")
 
-        # Annotated images
+        # Genera las imágenes anotadas (NMS ya aplicado, apply_nms=False)
         visualize_coco_results(
             results_json_path=OUTPUT_JSON_PATH,
             images_dir=INPUT_DIR,
@@ -272,7 +280,7 @@ class InferenceEngine:
             apply_nms=False,
         )
         _log("🎨 Annotated images saved")
-        yield  # done
+        yield  # Punto de yield final: pipeline completado
 
     # ----------------------------------------------------------
     # Helpers
@@ -280,6 +288,7 @@ class InferenceEngine:
 
     @staticmethod
     def _get_target_images() -> List[Path]:
+        # Excluye las imágenes de referencia y los strips generados
         return sorted([
             f for f in INPUT_DIR.glob("*.jpg")
             if f.name not in REFERENCE_FILENAMES
@@ -303,6 +312,7 @@ class InferenceEngine:
             img = cv2.imread(str(p))
             if img is not None:
                 rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                # El label es el nombre de clase extraído del nombre de archivo
                 label = p.stem.replace("reference_", "")
                 gallery.append((rgb, label))
         return gallery

@@ -32,8 +32,10 @@ def load_coco_data(json_path: Path) -> Tuple[Dict, Dict, Dict, Dict]:
     with open(json_path, "r") as f:
         data = json.load(f)
 
+    # Indexa imágenes por su ID para acceso O(1)
     images = {img["id"]: img for img in data["images"]}
 
+    # Agrupa anotaciones por imagen para no recorrer la lista completa cada vez
     anns: Dict[int, List] = {}
     for ann in data["annotations"]:
         img_id = ann["image_id"]
@@ -41,6 +43,7 @@ def load_coco_data(json_path: Path) -> Tuple[Dict, Dict, Dict, Dict]:
             anns[img_id] = []
         anns[img_id].append(ann)
 
+    # Mapa nombre_de_archivo -> id (útil para buscar por nombre)
     filename_to_id = {img["file_name"]: img["id"] for img in data["images"]}
 
     return data, images, anns, filename_to_id
@@ -70,7 +73,7 @@ def class_agnostic_nms(
     Returns:
         Filtered list of annotation dicts.
     """
-    # Group by image
+    # Agrupa detecciones por imagen para aplicar NMS imagen a imagen
     by_image: Dict[int, List[Dict]] = {}
     for ann in annotations:
         img_id = ann["image_id"]
@@ -84,11 +87,12 @@ def class_agnostic_nms(
         if not anns:
             continue
 
-        # Sort by score descending
+        # Ordena por score descendente: el mejor siempre gana
         anns.sort(key=lambda x: x["score"], reverse=True)
 
         keep = []
         while anns:
+            # Toma el mejor box y lo acepta directamente
             best = anns.pop(0)
             keep.append(best)
 
@@ -96,13 +100,14 @@ def class_agnostic_nms(
             box1 = [bx1, by1, bx1 + bw, by1 + bh]
             area1 = bw * bh
 
+            # Compara el mejor box con todos los restantes
             remaining = []
             for other in anns:
                 ox1, oy1, ow, oh = other["bbox"]
                 box2 = [ox1, oy1, ox1 + ow, oy1 + oh]
                 area2 = ow * oh
 
-                # Compute intersection
+                # Calcula la intersección entre los dos boxes
                 ix1 = max(box1[0], box2[0])
                 iy1 = max(box1[1], box2[1])
                 ix2 = min(box1[2], box2[2])
@@ -112,10 +117,11 @@ def class_agnostic_nms(
                 ih = max(0, iy2 - iy1)
                 inter = iw * ih
 
-                # Coverage: how much of the smaller box is covered
+                # Coverage: qué fracción del box más pequeño está cubierta
                 min_area = min(area1, area2)
                 coverage = inter / min_area if min_area > 0 else 0
 
+                # Si la cobertura es baja, el box no solapa demasiado → se conserva
                 if coverage < coverage_threshold:
                     remaining.append(other)
 
@@ -150,6 +156,7 @@ def draw_final_boxes(
         x, y, w, h = map(int, ann["bbox"])
         cls_id = ann["category_id"]
         score = ann["score"]
+        # Color por clase definido en config.CLASS_COLORS
         color = CLASS_COLORS.get(cls_id, (255, 255, 255))
 
         cv2.rectangle(vis, (x, y), (x + w, y + h), color, 2)
@@ -189,24 +196,24 @@ def visualize_coco_results(
         print("[WARN] No annotations found in results JSON.")
         return
 
-    # Apply NMS for visualization (does not modify the saved JSON)
+    # NMS solo para dibujar; el JSON original no se toca
     if apply_nms:
         draw_anns = class_agnostic_nms(annotations)
         print(f"  NMS for visualization: {len(annotations)} → {len(draw_anns)} boxes")
     else:
         draw_anns = annotations
 
-    # Group filtered annotations by image_id and apply per-class thresholds
+    # Agrupa por imagen y aplica filtros de visualización por clase
     anns_by_img: Dict[int, List[Dict]] = {}
     for ann in draw_anns:
         cls_id = ann["category_id"]
         score = ann["score"]
 
-        # Skip disabled classes
+        # Omite clases desactivadas (ej. FA DC)
         if cls_id in VISUALIZATION_DISABLED_CLASSES:
             continue
 
-        # Skip if below per-class threshold
+        # Omite detecciones por debajo del umbral de visualización de la clase
         threshold = VISUALIZATION_THRESHOLDS.get(cls_id, 0.5)
         if score < threshold:
             continue
@@ -228,6 +235,7 @@ def visualize_coco_results(
         if img is None:
             continue
 
+        # Dibuja solo las detecciones filtradas de esta imagen
         img_anns = anns_by_img.get(img_id, [])
         vis = draw_final_boxes(img, img_anns)
 
@@ -263,5 +271,6 @@ def build_coco_results(
         },
         "images": list(images_dict.values()),
         "annotations": annotations,
+        # Incluye el mapa de categorías para que el JSON sea COCO-compliant
         "categories": [{"id": k, "name": v} for k, v in CLASSES.items()],
     }

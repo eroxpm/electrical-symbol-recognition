@@ -24,7 +24,7 @@ from src.config import (
     VISUALIZATION_DISABLED_CLASSES,
 )
 
-# Set non-interactive backend for Docker
+# Backend no interactivo: necesario en Docker (sin pantalla)
 plt.switch_backend("Agg")
 
 
@@ -33,8 +33,10 @@ def _filter_predictions(annotations: List[Dict]) -> List[Dict]:
     filtered = []
     for ann in annotations:
         cls_id = ann["category_id"]
+        # Omite clases desactivadas (ej. FA DC)
         if cls_id in VISUALIZATION_DISABLED_CLASSES:
             continue
+        # Omite predicciones por debajo del umbral de visualización
         threshold = VISUALIZATION_THRESHOLDS.get(cls_id, 0.5)
         if ann.get("score", 1.0) < threshold:
             continue
@@ -56,10 +58,10 @@ def _match_boxes(
     if gt_boxes.numel() == 0 or pred_boxes.numel() == 0:
         return []
 
-    # Compute IoU matrix (N, M)
+    # Calcula la matriz IoU completa entre todos los GT y todas las predicciones
     iou_matrix = box_iou(gt_boxes, pred_boxes)
 
-    # Greedy matching
+    # Ordena todos los pares por IoU descendente para hacer matching greedy
     values, indices = torch.sort(iou_matrix.flatten(), descending=True)
     
     matched_gt = set()
@@ -68,11 +70,12 @@ def _match_boxes(
 
     for idx, val in zip(indices, values):
         if val < iou_threshold:
-            break
+            break  # El resto tendrá IoU aún menor, podemos parar
             
         gt_idx = (idx // iou_matrix.shape[1]).item()
         pred_idx = (idx % iou_matrix.shape[1]).item()
 
+        # Cada GT y cada predicción solo puede emparejarse una vez
         if gt_idx in matched_gt or pred_idx in matched_pred:
             continue
 
@@ -99,10 +102,12 @@ def _build_classification_data(
     with open(results_json_path, "r") as f:
         pred_data = json.load(f)
 
+    # Solo evalúa imágenes que aparezcan en ambos JSONs
     gt_file_to_id = {img["file_name"]: img["id"] for img in gt_data["images"]}
     pred_file_to_id = {img["file_name"]: img["id"] for img in pred_data["images"]}
     common_files = set(gt_file_to_id) & set(pred_file_to_id)
 
+    # Agrupa GT por imagen, excluyendo clases desactivadas
     gt_by_img: Dict[int, List[Dict]] = {}
     for ann in gt_data["annotations"]:
         img_id = ann["image_id"]
@@ -113,6 +118,7 @@ def _build_classification_data(
             continue
         gt_by_img.setdefault(img_id, []).append(ann)
 
+    # Filtra predicciones con los mismos criterios que la visualización
     filtered_preds = _filter_predictions(pred_data.get("annotations", []))
     pred_by_img: Dict[int, List[Dict]] = {}
     for ann in filtered_preds:
@@ -126,6 +132,7 @@ def _build_classification_data(
         gts = gt_by_img.get(img_id, [])
         preds = pred_by_img.get(img_id, [])
 
+        # Convierte bboxes [x,y,w,h] → [x1,y1,x2,y2] para torchvision.box_iou
         g_boxes = (
             torch.tensor([
                 [a["bbox"][0], a["bbox"][1],
@@ -147,17 +154,20 @@ def _build_classification_data(
         used_g: Set[int] = set()
         used_p: Set[int] = set()
 
+        # Pares emparejados: verdaderos positivos (o errores de clase)
         for gi, pi, _ in matched_pairs:
             used_g.add(gi)
             used_p.add(pi)
             y_true.append(CLASSES.get(gts[gi]["category_id"], str(gts[gi]["category_id"])))
             y_pred.append(CLASSES.get(preds[pi]["category_id"], str(preds[pi]["category_id"])))
 
+        # GT sin match → falso negativo (el modelo no lo detectó)
         for i, ann in enumerate(gts):
             if i not in used_g:
                 y_true.append(CLASSES.get(ann["category_id"], str(ann["category_id"])))
                 y_pred.append("Background")
 
+        # Predicción sin match → falso positivo (el modelo detectó algo que no existe)
         for i, ann in enumerate(preds):
             if i not in used_p:
                 y_true.append("Background")
@@ -184,6 +194,7 @@ def compute_metrics(
     print(f"  Generating Metrics Reports (IoU > {iou_threshold})")
     print(f"{'=' * 80}")
 
+    # Genera el informe de clasificación (precision, recall, f1, support) por clase
     report_dict = classification_report(
         y_true, y_pred, labels=labels,
         output_dict=True, zero_division=0.0,
@@ -193,6 +204,7 @@ def compute_metrics(
     df.to_csv(csv_path)
     print(f"Saved metrics CSV -> {csv_path}")
 
+    # Genera y guarda la matriz de confusión como imagen PNG
     cm = confusion_matrix(y_true, y_pred, labels=cm_labels)
     fig, ax = plt.subplots(figsize=(10, 8))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=cm_labels)
@@ -226,28 +238,28 @@ def compute_metrics_for_ui(
     )
     cm_labels = labels + ["Background"]
 
-    # Metrics DataFrame
+    # DataFrame de métricas para mostrar en la tabla de Gradio
     report_dict = classification_report(
         y_true, y_pred, labels=labels,
         output_dict=True, zero_division=0.0,
     )
     df = pd.DataFrame(report_dict).transpose()
 
-    # Round for readability
+    # Redondea para mejor legibilidad en la UI
     for col in ["precision", "recall", "f1-score"]:
         if col in df.columns:
             df[col] = df[col].round(2)
     if "support" in df.columns:
         df["support"] = df["support"].astype(int)
 
-    # Reset index so class names become a column (cleaner for gr.Dataframe)
+    # Convierte el índice en columna para que gr.Dataframe lo muestre correctamente
     df = df.reset_index().rename(columns={"index": "Class"})
 
-    # Also save to disk
+    # También guarda en disco
     output_dir = results_json_path.parent
     df.to_csv(output_dir / "metrics.csv")
 
-    # Confusion Matrix Figure
+    # Figura de la matriz de confusión para gr.Plot
     cm = confusion_matrix(y_true, y_pred, labels=cm_labels)
     fig, ax = plt.subplots(figsize=(5, 4))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=cm_labels)
@@ -257,8 +269,7 @@ def compute_metrics_for_ui(
     plt.yticks(fontsize=8)
     fig.tight_layout(pad=0.5)
 
-    # Also save to disk
+    # También guarda en disco
     fig.savefig(output_dir / "confusion_matrix.png")
 
     return df, fig
-

@@ -228,4 +228,3 @@ libs/sam3/
 # Secrets / tokens
 .env.local
 *.token
-INTERVIEW_PREP.md

@@ -55,6 +55,7 @@ class SAM3Model:
         self.confidence_threshold = confidence_threshold
         self.mask_threshold = mask_threshold
         self.hf_token = hf_token
+        # Usa GPU si está disponible, si no CPU
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.processor = None
@@ -65,12 +66,14 @@ class SAM3Model:
         if self._initialized:
             return
 
+        # Login en HuggingFace si se proporcionó token
         if self.hf_token:
             from huggingface_hub import login
             login(token=self.hf_token)
 
         from transformers import Sam3Model, Sam3Processor
 
+        # Cachea el modelo en models/huggingface/ para no descargarlo cada vez
         from src.config import MODELS_DIR
         cache_dir = MODELS_DIR / "huggingface"
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -99,12 +102,15 @@ class SAM3Model:
         if not boxes_xyxy:
             return {"masks": [], "boxes": [], "scores": []}
 
+        # Envuelve los prompts en lista (formato que espera el processor)
         input_boxes = [boxes_xyxy]
         if labels is not None:
             input_boxes_labels = [labels]
         else:
+            # Si no se pasan etiquetas, todas son "foreground" (1)
             input_boxes_labels = [[1] * len(boxes_xyxy)]
 
+        # Preprocesa imagen + prompts y mueve a GPU/CPU
         inputs = self.processor(
             images=image,
             input_boxes=input_boxes,
@@ -112,9 +118,11 @@ class SAM3Model:
             return_tensors="pt",
         ).to(self.device)
 
+        # Inferencia sin calcular gradientes (más rápido, menos memoria)
         with torch.no_grad():
             outputs = self.model(**inputs)
 
+        # Post-procesa: convierte máscaras en bounding boxes con score
         results = self.processor.post_process_instance_segmentation(
             outputs,
             threshold=self.confidence_threshold,
@@ -143,6 +151,7 @@ class MatrixGenerator:
         self.coco_anns = coco_anns
         self.coco_images = coco_images
         self.filename_to_id = filename_to_id
+        # Diccionario clase_id -> imagen recortada del símbolo de referencia
         self.best_crops: Dict[int, np.ndarray] = {}
 
     # ----------------------------------------------------------
@@ -160,7 +169,7 @@ class MatrixGenerator:
         needed_classes = set(CLASSES.keys())
         all_ref_files = list(REFERENCES_DIR.glob("*.jpg"))
 
-        # --- Custom Capacitor / Inductor overrides ---
+        # --- Prioridad 1: crops manuales definidos en CUSTOM_REFERENCE_CROPS ---
         for cls_id, filename in CUSTOM_REFERENCE_CROPS.items():
             if cls_id not in needed_classes:
                 continue
@@ -175,7 +184,7 @@ class MatrixGenerator:
                 else:
                     print(f"  [WARN] Failed to read custom image {filename}")
 
-        # --- Custom FA DC: extracted from COCO annotation ---
+        # --- Prioridad 2: FA DC extraído de una anotación COCO específica ---
         if 3 in needed_classes:
             target_img_id = self.filename_to_id.get(CUSTOM_FA_DC_SOURCE)
             if target_img_id:
@@ -187,7 +196,7 @@ class MatrixGenerator:
                     src_img = cv2.imread(str(src_path))
                     if src_img is not None:
                         x, y, w, h = map(int, dc_ann["bbox"])
-                        # Tight crop (0% margin)
+                        # Recorte ajustado sin margen
                         crop = src_img[y : y + h, x : x + w]
                         if crop.size > 0:
                             self.best_crops[3] = crop
@@ -199,7 +208,7 @@ class MatrixGenerator:
             else:
                 print(f"  [WARN] Custom FA DC filename not found in COCO: {CUSTOM_FA_DC_SOURCE}")
 
-        # --- Fallback: debug_classes crops ---
+        # --- Prioridad 3: crops automáticos desde archivos debug_classes ---
         for cls_id in list(needed_classes):
             prefix = f"class_{cls_id}_"
             cls_images = [f for f in all_ref_files if f.name.startswith(prefix)]
@@ -210,6 +219,7 @@ class MatrixGenerator:
             debug_filename = debug_path.name
 
             try:
+                # El nombre del archivo codifica: class_ID_NombreClase_imgId_annId.jpg
                 parts = debug_filename.replace(".jpg", "").split("_")
                 img_id = int(parts[-2])
                 ann_id = int(parts[-1])
@@ -225,6 +235,7 @@ class MatrixGenerator:
                     print(f"  [WARN] Failed to read source image {src_path}")
                     continue
 
+                # Busca la anotación concreta por su ID
                 target_ann = None
                 if img_id in self.coco_anns:
                     for ann in self.coco_anns[img_id]:
@@ -236,11 +247,13 @@ class MatrixGenerator:
                     continue
 
                 x, y, w, h = map(float, target_ann["bbox"])
+                # Aplica margen de expansión según la clase (config.CROP_MARGINS)
                 margin_pct = CROP_MARGINS.get(cls_id, 0.15)
                 margin_w = w * margin_pct
                 margin_h = h * margin_pct
 
                 if cls_id == 0:
+                    # Resistor: sin margen para evitar ruido de fondo
                     margin_w = margin_h = 0
                     print(f"  [INFO] Resistor (Class 0): Using TIGHT crop (0% expansion).")
 
@@ -272,11 +285,12 @@ class MatrixGenerator:
         """
         rows = MATRIX_ROWS
         cols = 2
+        # Columna 0: escala original con rotaciones | Columna 1: multi-escala
         classes_to_render = [target_cls, target_cls]
 
         cw, ch = MATRIX_CROP_SIZE
 
-        # Dynamic sizing based on actual crop dimensions
+        # Tamaño de celda dinámico basado en el crop real (con buffer de margen)
         if target_cls in self.best_crops:
             crop = self.best_crops[target_cls]
             crop_h, crop_w = crop.shape[:2]
@@ -288,6 +302,7 @@ class MatrixGenerator:
         pad = MATRIX_PADDING
         matrix_h = rows * (ch + pad) + pad
         matrix_w = cols * (cw + pad) + pad
+        # Fondo blanco para el strip
         matrix_img = np.ones((matrix_h, matrix_w, 3), dtype=np.uint8) * 255
 
         grid_info: List[Dict] = []
@@ -299,10 +314,11 @@ class MatrixGenerator:
             base_crop = self.best_crops[cls_id]
 
             for r in range(rows):
-                # ----- Multi-scale column (col 1) -----
+                # ----- Columna 1: variaciones de escala (±35% o ±50%) -----
                 if col_idx == 1:
                     s_low, s_high = SCALE_RANGES.get(cls_id, (0.65, 1.35))
 
+                    # 4 variantes: escala baja normal, baja rotada, alta normal, alta rotada
                     if r == 0:
                         scale_factor, rot_code = s_low, None
                     elif r == 1:
@@ -320,12 +336,13 @@ class MatrixGenerator:
                         resized = cv2.rotate(resized, rot_code)
 
                     rh, rw = resized.shape[:2]
+                    # Contenedor blanco de tamaño fijo; el crop se centra dentro
                     container = np.ones((ch, cw, 3), dtype=np.uint8) * 255
 
                     y_off = (ch - rh) // 2
                     x_off = (cw - rw) // 2
 
-                    # Clipping logic
+                    # Lógica de clipping: si el crop escalado es mayor que la celda, se recorta
                     src_x1, src_y1 = 0, 0
                     src_x2, src_y2 = rw, rh
                     dst_x1, dst_y1 = x_off, y_off
@@ -351,7 +368,7 @@ class MatrixGenerator:
                     rotated = container
                     content_box_rel = [dst_x1, dst_y1, dst_x2, dst_y2]
 
-                # ----- Standard column (col 0) -----
+                # ----- Columna 0: escala original con 4 rotaciones (0°, 90°, 180°, 270°) -----
                 else:
                     bh, bw = self.best_crops[cls_id].shape[:2]
                     container = np.ones((ch, cw, 3), dtype=np.uint8) * 255
@@ -373,7 +390,7 @@ class MatrixGenerator:
                     else:
                         rotated = cv2.rotate(container, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-                # Adjust content_box for rotation (standard column only)
+                # Recalcula la caja de contenido tras la rotación (intercambia ancho/alto si aplica)
                 needs_swap = (col_idx != 1)
                 final_rel_box = list(content_box_rel)
 
@@ -388,12 +405,12 @@ class MatrixGenerator:
                     new_y_off = (ch - curr_h) // 2
                     final_rel_box = [new_x_off, new_y_off, new_x_off + curr_w, new_y_off + curr_h]
 
-                # Place cell in matrix
+                # Coloca la celda en su posición dentro del strip
                 x_offset = pad + col_idx * (cw + pad)
                 y_offset = pad + r * (ch + pad)
                 matrix_img[y_offset:y_offset + ch, x_offset:x_offset + cw] = rotated
 
-                # Absolute box in matrix coordinates
+                # Convierte la caja relativa a coordenadas absolutas del strip
                 abs_x1 = x_offset + final_rel_box[0]
                 abs_y1 = y_offset + final_rel_box[1]
                 abs_x2 = x_offset + final_rel_box[2]
@@ -444,6 +461,7 @@ def infer_image_all_classes(
         return [], {}, start_ann_id
 
     t_h, t_w = target_img.shape[:2]
+    # Metadatos COCO de la imagen procesada
     image_meta = {
         "id": img_id,
         "file_name": target_path.name,
@@ -454,13 +472,15 @@ def infer_image_all_classes(
     annotations: List[Dict] = []
     ann_id = start_ann_id
 
+    # Itera sobre cada clase y su strip de referencia precomputado
     for cls_id, (strip_img, strip_info) in precomputed_strips.items():
         cls_name = CLASSES.get(cls_id, str(cls_id))
+        # Ajusta el umbral de confianza por clase antes de inferir
         conf = CONFIDENCE_THRESHOLDS.get(cls_id, DEFAULT_CONFIDENCE)
         sam_model.confidence_threshold = conf
         ann_id_before = ann_id
 
-        # Scale strip to match target height
+        # Escala el strip para que tenga la misma altura que la imagen objetivo
         m_h_base, m_w_base = strip_img.shape[:2]
         target_strip_h = min(int(t_h * 1.0), t_h)
         scale = target_strip_h / m_h_base
@@ -471,12 +491,12 @@ def infer_image_all_classes(
             interpolation=cv2.INTER_LINEAR,
         )
 
-        # Pad to full target height (center vertically)
+        # Centra el strip verticalmente en un lienzo del tamaño de la imagen
         matrix_scaled = np.ones((t_h, new_m_w, 3), dtype=np.uint8) * 255
         y_offset = (t_h - target_strip_h) // 2
         matrix_scaled[y_offset:y_offset + target_strip_h, :] = matrix_content
 
-        # Scale cell metadata
+        # Escala también las coordenadas de las celdas del strip
         scaled_info = []
         for cell in strip_info:
             x1, y1, x2, y2 = cell["box"]
@@ -486,22 +506,24 @@ def infer_image_all_classes(
             ny2 = min(target_strip_h + y_offset, int(y2 * scale) + y_offset)
             scaled_info.append({"class_id": cell["class_id"], "box": [nx1, ny1, nx2, ny2]})
 
-        # Build canvas: [reference strip | target image]
+        # Construye el canvas final: [strip_referencia | imagen_objetivo]
         canvas = np.zeros((t_h, new_m_w + t_w, 3), dtype=np.uint8)
         canvas[:, :new_m_w, :] = matrix_scaled
         canvas[:, new_m_w:, :] = target_img
         canvas_pil = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
 
-        # Prepare prompts
+        # Extrae las bounding boxes de las celdas del strip como prompts para SAM3
         active_prompts = [cell["box"] for cell in scaled_info]
         if not active_prompts:
             continue
 
+        # Etiqueta 1 = foreground (le dice a SAM3 que busque objetos similares)
         active_labels = [1] * len(active_prompts)
+        # Usa la última celda (escala mayor) como referencia de tamaño para el filtro posterior
         last = active_prompts[-1]
         prompt_ref_size = (last[2] - last[0], last[3] - last[1])
 
-        # Inference
+        # Llama a SAM3 con el canvas completo y los prompts del strip
         try:
             res = sam_model.predict_with_boxes(
                 image=canvas_pil,
@@ -515,16 +537,19 @@ def infer_image_all_classes(
         d_boxes = res.get("boxes", [])
         scores = res.get("scores", [])
 
+        # Normaliza scores a lista Python
         if torch.is_tensor(scores):
             scores = scores.tolist() if scores.numel() > 0 else []
         if not scores:
             scores = [1.0] * len(d_boxes)
 
-        # Filter detections
+        # Filtra y convierte detecciones a coordenadas de la imagen objetivo
         for i, box in enumerate(d_boxes):
             x1, y1, x2, y2 = box
             cx = (x1 + x2) / 2
+            # Solo nos interesan detecciones cuyo centro esté en la zona de la imagen (no el strip)
             if cx > new_m_w:
+                # Resta el ancho del strip para obtener coordenadas relativas a la imagen
                 nx1 = max(0, x1 - new_m_w)
                 nx2 = max(0, x2 - new_m_w)
                 ny1 = max(0, y1)
@@ -533,6 +558,7 @@ def infer_image_all_classes(
                 nh = ny2 - ny1
 
                 ref_w, ref_h = prompt_ref_size
+                # Descarta detecciones más grandes que SIZE_FILTER_MULTIPLIER × referencia
                 if nw > ref_w * SIZE_FILTER_MULTIPLIER or nh > ref_h * SIZE_FILTER_MULTIPLIER:
                     continue
 
@@ -551,8 +577,8 @@ def infer_image_all_classes(
         if cls_det > 0:
             _log(f"    {cls_name}: {cls_det} det.")
 
+        # Libera el canvas de memoria antes de la siguiente clase
         del canvas, canvas_pil
 
     del target_img
     return annotations, image_meta, ann_id
-
